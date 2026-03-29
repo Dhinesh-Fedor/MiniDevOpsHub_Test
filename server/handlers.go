@@ -14,29 +14,31 @@ import (
 )
 
 func dashboardHandler(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path == "/" {
+	// Serve dashboard for root or any unknown path
+	if r.URL.Path == "/" || r.URL.Path == "/dashboard" {
 		w.Header().Set("Content-Type", "text/html")
 		w.Write(dashboardHTML)
 		return
 	}
-	// Proxy /appName to worker
+	// Proxy /appName to worker if app exists and is live
 	appName := strings.TrimPrefix(r.URL.Path, "/")
 	app, ok := apps[appName]
-	if !ok || app.Status != "Live" {
-		w.WriteHeader(404)
-		w.Write([]byte("App not found or not live"))
+	if ok && app.Status == "Live" {
+		proxyURL := fmt.Sprintf("http://%s:3000/", app.WorkerIP)
+		resp, err := http.Get(proxyURL)
+		if err != nil {
+			w.WriteHeader(502)
+			w.Write([]byte("Proxy error"))
+			return
+		}
+		defer resp.Body.Close()
+		w.WriteHeader(resp.StatusCode)
+		io.Copy(w, resp.Body)
 		return
 	}
-	proxyURL := fmt.Sprintf("http://%s:3000/", app.WorkerIP)
-	resp, err := http.Get(proxyURL)
-	if err != nil {
-		w.WriteHeader(502)
-		w.Write([]byte("Proxy error"))
-		return
-	}
-	defer resp.Body.Close()
-	w.WriteHeader(resp.StatusCode)
-	io.Copy(w, resp.Body)
+	// For any other path, serve dashboard (SPA style)
+	w.Header().Set("Content-Type", "text/html")
+	w.Write(dashboardHTML)
 }
 
 func createAppHandler(w http.ResponseWriter, r *http.Request) {
