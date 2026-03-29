@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MiniDevOpsHub Dashboard</title>
+  <style>
+    body {
+      font-family: 'Segoe UI', Arial, sans-serif;
+      margin: 0;
+      background: linear-gradient(120deg, #f6f8fa 0%, #e9ecef 100%);
+      color: #22223b;
+    }
+    .container {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 2.5rem 1rem;
+    }
+    h1 {
+      color: #22223b;
+      font-size: 2.2rem;
+      letter-spacing: 1px;
+      margin-bottom: 2rem;
+      text-align: center;
+    }
+    section {
+      background: #fff;
+      border-radius: 12px;
+      margin-bottom: 2.2rem;
+      box-shadow: 0 4px 16px #0001;
+      padding: 2rem 1.5rem;
+      transition: box-shadow 0.2s;
+    }
+    section:hover {
+      box-shadow: 0 8px 32px #0002;
+    }
+    .section-title {
+      font-size: 1.25rem;
+      color: #4a4e69;
+      margin-bottom: 1.2rem;
+      font-weight: 600;
+      letter-spacing: 0.5px;
+    }
+    .logs {
+      background: #232946;
+      color: #eebbc3;
+      font-family: 'Fira Mono', monospace;
+      padding: 1rem;
+      border-radius: 8px;
+      height: 220px;
+      overflow-y: auto;
+      font-size: 1rem;
+      margin-bottom: 0.5rem;
+    }
+    table {
+      width: 100%;
+      border-collapse: separate;
+      border-spacing: 0;
+      background: #f8f9fa;
+      border-radius: 8px;
+      overflow: hidden;
+      box-shadow: 0 1px 4px #0001;
+    }
+    th, td {
+      padding: 0.7rem 0.5rem;
+      border-bottom: 1px solid #e9ecef;
+      text-align: left;
+    }
+    th {
+      background: #e9ecef;
+      font-weight: 600;
+      color: #232946;
+    }
+    tr:last-child td {
+      border-bottom: none;
+    }
+    button {
+      background: #4a4e69;
+      color: #fff;
+      border: none;
+      border-radius: 5px;
+      padding: 0.4rem 0.9rem;
+      margin: 0.1rem 0.2rem;
+      font-size: 1rem;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    button:hover {
+      background: #9a8c98;
+    }
+    input, select {
+      padding: 0.4rem 0.7rem;
+      border: 1px solid #bfc0c0;
+      border-radius: 5px;
+      margin-right: 0.5rem;
+      font-size: 1rem;
+      margin-bottom: 0.5rem;
+    }
+    #worker-list, #commit-list {
+      padding-left: 1.2rem;
+      font-size: 1rem;
+    }
+    #worker-list li, #commit-list li {
+      margin-bottom: 0.3rem;
+    }
+    #repo-info {
+      background: #f2e9e4;
+      border-radius: 6px;
+      padding: 0.7rem 1rem;
+      margin-bottom: 0.7rem;
+      font-size: 1rem;
+      color: #232946;
+      white-space: pre-line;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>MiniDevOpsHub Dashboard</h1>
+    <section>
+      <div class="section-title">Register Worker</div>
+      <form id="worker-form">
+        <input type="text" id="worker-name" placeholder="Worker Name" required />
+        <input type="text" id="worker-ip" placeholder="Worker IP" required />
+        <button type="submit">Register</button>
+      </form>
+    </section>
+    <section>
+      <div class="section-title">Deploy New Project</div>
+      <form id="deploy-form">
+        <input type="text" id="repo-url" placeholder="GitHub Repo URL" required />
+        <input type="text" id="branch" placeholder="Branch (default: main)" />
+        <select id="worker-select"></select>
+        <button type="submit">Deploy</button>
+      </form>
+    </section>
+    <section>
+      <div class="section-title">Projects</div>
+      <table id="projects-table">
+        <thead>
+          <tr><th>ID</th><th>Repo</th><th>Branch</th><th>Port</th><th>Status</th><th>Actions</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </section>
+      <section>
+        <div class="section-title">Repo Info & Commits</div>
+        <div id="repo-info"></div>
+        <button id="show-commits-btn">Show Commit History</button>
+        <ul id="commit-list"></ul>
+      </section>
+    <section>
+      <div class="section-title">Logs</div>
+      <div class="logs" id="logs"></div>
+      <button id="live-logs-btn">Show Live Logs</button>
+    </section>
+    <section>
+      <div class="section-title">Workers</div>
+      <ul id="worker-list"></ul>
+    </section>
+    <section>
+      <div class="section-title">Help</div>
+      <ul>
+        <li>Register workers (server IPs) before deploying.</li>
+        <li>Deploy a project by linking a GitHub repo and selecting a worker.</li>
+        <li>Use Clean to remove a deployment, Rollback to revert, and Logs for build/runtime output.</li>
+        <li>Click Show Commit History for repo commits.</li>
+      </ul>
+    </section>
+  </div>
+      async function loadWorkerList() {
+        const workers = await fetchJSON('/workers');
+        const ul = document.getElementById('worker-list');
+        ul.innerHTML = '';
+        for (const w of workers) {
+          const li = document.createElement('li');
+          li.textContent = `${w.name} (${w.ip}) - ${w.status}`;
+          ul.appendChild(li);
+        }
+      }
+      setInterval(loadWorkerList, 10000);
+      loadWorkerList();
+  <script>
+    async function fetchJSON(url, opts) {
+      const res = await fetch(url, opts);
+      if (!res.ok) throw new Error(await res.text());
+      return res.json();
+    }
+    async function loadWorkers() {
+      const workers = await fetchJSON('/workers');
+      const select = document.getElementById('worker-select');
+      select.innerHTML = '';
+      for (const w of workers) {
+        const opt = document.createElement('option');
+        opt.value = w.worker_id;
+        opt.textContent = `${w.name} (${w.ip})`;
+        select.appendChild(opt);
+      }
+    }
+    document.getElementById('worker-form').onsubmit = async e => {
+      e.preventDefault();
+      const name = document.getElementById('worker-name').value;
+      const ip = document.getElementById('worker-ip').value;
+      await fetchJSON('/workers', {method:'POST',body:JSON.stringify({name,ip}),headers:{'Content-Type':'application/json'}});
+      loadWorkers();
+    };
+    async function loadProjects() {
+      const projects = await fetchJSON('/projects');
+      const tbody = document.querySelector('#projects-table tbody');
+      tbody.innerHTML = '';
+      for (const p of projects) {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td>${p.project_id}</td>
+          <td>${p.repo_url}</td>
+          <td>${p.branch}</td>
+          <td>${p.port}</td>
+          <td>${p.status}</td>
+          <td>${p.worker_id || ''}</td>
+          <td>
+            <button onclick="redeploy('${p.project_id}')">Redeploy</button>
+            <button onclick="showLogs('${p.project_id}')">Logs</button>
+            <button onclick="cleanup('${p.project_id}')">Clean</button>
+            <button onclick="rollback('${p.project_id}')">Rollback</button>
+          </td>
+        `;
+        tbody.appendChild(tr);
+      }
+    }
+    async function redeploy(project_id) {
+      await fetchJSON('/deploy', {method:'POST',body:JSON.stringify({project_id})});
+      loadProjects();
+    }
+    async function cleanup(project_id) {
+      await fetchJSON('/cleanup', {method:'POST',body:JSON.stringify({project_id})});
+      loadProjects();
+    }
+    async function rollback(project_id) {
+      await fetchJSON('/rollback', {method:'POST',body:JSON.stringify({project_id})});
+      loadProjects();
+    }
+    async function showLogs(project_id) {
+      const logs = await fetchJSON(`/logs/${project_id}`);
+      document.getElementById('logs').innerText = logs.join('\n');
+      document.getElementById('live-logs-btn').onclick = () => showLiveLogs(project_id);
+        document.getElementById('show-commits-btn').onclick = () => showCommits(project_id);
+        showRepoInfo(project_id);
+    }
+      async function showRepoInfo(project_id) {
+        document.getElementById('repo-info').innerText = 'Loading repo info...';
+        try {
+          const info = await fetchJSON(`/repo/${project_id}`);
+          document.getElementById('repo-info').innerText = `Repo: ${info.repo_url}\nBranch: ${info.branch}\nLast Commit: ${info.last_commit}\nCommit Time: ${info.commit_time}`;
+        } catch (e) {
+          document.getElementById('repo-info').innerText = 'Repo info not found.';
+        }
+      }
+      async function showCommits(project_id) {
+        const commitList = document.getElementById('commit-list');
+        commitList.innerHTML = '<li>Loading commit history...</li>';
+        try {
+          const commits = await fetchJSON(`/commits/${project_id}`);
+          commitList.innerHTML = '';
+          for (const c of commits) {
+            const li = document.createElement('li');
+            li.textContent = `${c.hash}: ${c.msg} (${c.time})`;
+            commitList.appendChild(li);
+          }
+        } catch (e) {
+          commitList.innerHTML = '<li>No commit history found.</li>';
+        }
+      }
+    function showLiveLogs(project_id) {
+      const logsDiv = document.getElementById('logs');
+      logsDiv.innerText = '';
+      const evtSource = new EventSource(`/logs/stream?project_id=${project_id}`);
+      evtSource.onmessage = function(e) {
+        logsDiv.innerText += e.data + '\n';
+        logsDiv.scrollTop = logsDiv.scrollHeight;
+      };
+      evtSource.onerror = function() { evtSource.close(); };
+    }
+    document.getElementById('deploy-form').onsubmit = async e => {
+      e.preventDefault();
+      const repo_url = document.getElementById('repo-url').value;
+      const branch = document.getElementById('branch').value || 'main';
+      const worker_id = document.getElementById('worker-select').value;
+      await fetchJSON('/deploy', {method:'POST',body:JSON.stringify({repo_url,branch,worker_id})});
+      loadProjects();
+    };
+    setInterval(loadProjects, 5000);
+    setInterval(loadWorkers, 10000);
+    loadProjects();
+    loadWorkers();
+  </script>
+</body>
+</html>
