@@ -168,18 +168,137 @@
       </ul>
     </section>
   </div>
-      async function loadWorkerList() {
-        const workers = await fetchJSON('/workers');
-        const ul = document.getElementById('worker-list');
+  <script>
+    async function fetchJSON(url, opts) {
+      const res = await fetch(url, opts);
+      if (!res.ok) throw new Error(await res.text());
+      return res.json();
+    }
+
+    // Load workers into both the select (for deploy) and the worker list (for dashboard)
+    async function loadWorkers() {
+      const workers = await fetchJSON('/workers');
+      // Update worker select for deploy
+      const select = document.getElementById('worker-select');
+      if (select) {
+        select.innerHTML = '';
+        for (const w of workers) {
+          const opt = document.createElement('option');
+          opt.value = w.worker_id || w.name || w.ip;
+          opt.textContent = `${w.name} (${w.ip})`;
+          select.appendChild(opt);
+        }
+      }
+      // Update worker list for dashboard
+      const ul = document.getElementById('worker-list');
+      if (ul) {
         ul.innerHTML = '';
         for (const w of workers) {
           const li = document.createElement('li');
-          li.textContent = `${w.name} (${w.ip}) - ${w.status}`;
+          li.textContent = `${w.name} (${w.ip})`;
           ul.appendChild(li);
         }
       }
-      setInterval(loadWorkerList, 10000);
-      loadWorkerList();
+    }
+
+    document.getElementById('worker-form').onsubmit = async e => {
+      e.preventDefault();
+      const name = document.getElementById('worker-name').value;
+      const ip = document.getElementById('worker-ip').value;
+      await fetchJSON('/workers', {method:'POST',body:JSON.stringify({name,ip}),headers:{'Content-Type':'application/json'}});
+      loadWorkers();
+    };
+
+    async function loadProjects() {
+      const projects = await fetchJSON('/projects');
+      const tbody = document.querySelector('#projects-table tbody');
+      tbody.innerHTML = '';
+      for (const p of projects) {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td>${p.project_id}</td>
+          <td>${p.repo_url}</td>
+          <td>${p.branch}</td>
+          <td>${p.port}</td>
+          <td>${p.status}</td>
+          <td>${p.worker_id || ''}</td>
+          <td>
+            <button onclick="redeploy('${p.project_id}')">Redeploy</button>
+            <button onclick="showLogs('${p.project_id}')">Logs</button>
+            <button onclick="cleanup('${p.project_id}')">Clean</button>
+            <button onclick="rollback('${p.project_id}')">Rollback</button>
+          </td>
+        `;
+        tbody.appendChild(tr);
+      }
+    }
+
+    async function redeploy(project_id) {
+      await fetchJSON('/deploy', {method:'POST',body:JSON.stringify({project_id})});
+      loadProjects();
+    }
+    async function cleanup(project_id) {
+      await fetchJSON('/cleanup', {method:'POST',body:JSON.stringify({project_id})});
+      loadProjects();
+    }
+    async function rollback(project_id) {
+      await fetchJSON('/rollback', {method:'POST',body:JSON.stringify({project_id})});
+      loadProjects();
+    }
+    async function showLogs(project_id) {
+      const logs = await fetchJSON(`/logs/${project_id}`);
+      document.getElementById('logs').innerText = logs.join('\n');
+      document.getElementById('live-logs-btn').onclick = () => showLiveLogs(project_id);
+      document.getElementById('show-commits-btn').onclick = () => showCommits(project_id);
+      showRepoInfo(project_id);
+    }
+    async function showRepoInfo(project_id) {
+      document.getElementById('repo-info').innerText = 'Loading repo info...';
+      try {
+        const info = await fetchJSON(`/repo/${project_id}`);
+        document.getElementById('repo-info').innerText = `Repo: ${info.repo_url}\nBranch: ${info.branch}\nLast Commit: ${info.last_commit}\nCommit Time: ${info.commit_time}`;
+      } catch (e) {
+        document.getElementById('repo-info').innerText = 'Repo info not found.';
+      }
+    }
+    async function showCommits(project_id) {
+      const commitList = document.getElementById('commit-list');
+      commitList.innerHTML = '<li>Loading commit history...</li>';
+      try {
+        const commits = await fetchJSON(`/commits/${project_id}`);
+        commitList.innerHTML = '';
+        for (const c of commits) {
+          const li = document.createElement('li');
+          li.textContent = `${c.hash}: ${c.msg} (${c.time})`;
+          commitList.appendChild(li);
+        }
+      } catch (e) {
+        commitList.innerHTML = '<li>No commit history found.</li>';
+      }
+    }
+    function showLiveLogs(project_id) {
+      const logsDiv = document.getElementById('logs');
+      logsDiv.innerText = '';
+      const evtSource = new EventSource(`/logs/stream?project_id=${project_id}`);
+      evtSource.onmessage = function(e) {
+        logsDiv.innerText += e.data + '\n';
+        logsDiv.scrollTop = logsDiv.scrollHeight;
+      };
+      evtSource.onerror = function() { evtSource.close(); };
+    }
+    document.getElementById('deploy-form').onsubmit = async e => {
+      e.preventDefault();
+      const repo_url = document.getElementById('repo-url').value;
+      const branch = document.getElementById('branch').value || 'main';
+      const worker_id = document.getElementById('worker-select').value;
+      await fetchJSON('/deploy', {method:'POST',body:JSON.stringify({repo_url,branch,worker_id})});
+      loadProjects();
+    };
+    setInterval(loadProjects, 5000);
+    setInterval(loadWorkers, 10000);
+    loadProjects();
+    loadWorkers();
+  </script>
   <script>
     async function fetchJSON(url, opts) {
       const res = await fetch(url, opts);
