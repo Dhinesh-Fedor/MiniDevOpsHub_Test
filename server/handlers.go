@@ -1,45 +1,12 @@
 package main
 
-// ...existing code...
-
 import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"os/exec"
-	"strings"
-	"time"
 )
-
-func dashboardHandler(w http.ResponseWriter, r *http.Request) {
-	// Serve dashboard for root or any unknown path
-	if r.URL.Path == "/" || r.URL.Path == "/dashboard" {
-		w.Header().Set("Content-Type", "text/html")
-		w.Write(dashboardHTML)
-		return
-	}
-	// Proxy /appName to worker if app exists and is live
-	appName := strings.TrimPrefix(r.URL.Path, "/")
-	app, ok := apps[appName]
-	if ok && app.Status == "Live" {
-		proxyURL := fmt.Sprintf("http://%s:3000/", app.WorkerIP)
-		resp, err := http.Get(proxyURL)
-		if err != nil {
-			w.WriteHeader(502)
-			w.Write([]byte("Proxy error"))
-			return
-		}
-		defer resp.Body.Close()
-		w.WriteHeader(resp.StatusCode)
-		io.Copy(w, resp.Body)
-		return
-	}
-	// For any other path, serve dashboard (SPA style)
-	w.Header().Set("Content-Type", "text/html")
-	w.Write(dashboardHTML)
-}
 
 func createAppHandler(w http.ResponseWriter, r *http.Request) {
 	var req struct {
@@ -136,21 +103,21 @@ func rollbackHandler(w http.ResponseWriter, r *http.Request) {
 
 func logsStreamHandler(w http.ResponseWriter, r *http.Request) {
 	appName := r.URL.Query().Get("app")
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Content-Type", "application/json")
 	if l, ok := logs[appName]; ok {
-		for _, line := range l {
-			fmt.Fprintf(w, "data: %s\n\n", line)
-		}
+		json.NewEncoder(w).Encode(l)
+	} else {
+		json.NewEncoder(w).Encode([]string{"No logs found"})
 	}
-	w.(http.Flusher).Flush()
-	// Simulate live log streaming
-	for i := 0; i < 5; i++ {
-		time.Sleep(2 * time.Second)
-		fmt.Fprintf(w, "data: live log line %d\n\n", i+1)
-		w.(http.Flusher).Flush()
-	}
+	// Optionally: append a new log line for demo
+	// logs[appName] = append(logs[appName], fmt.Sprintf("Live log line %d", time.Now().Unix()))
+}
+
+// Webhook endpoint for auto-deploy (GitHub, etc.)
+func webhookHandler(w http.ResponseWriter, r *http.Request) {
+	// TODO: Validate signature, parse event, trigger deploy if push event
+	w.WriteHeader(200)
+	w.Write([]byte("Webhook received (demo)"))
 }
 
 func repoInfoHandler(w http.ResponseWriter, r *http.Request) {
