@@ -1,18 +1,23 @@
 package main
 
-
 import (
-  "log"
-  "os"
-  "github.com/gin-gonic/gin"
-  "github.com/minidevopshub/minidevopshub/internal/api"
+	"encoding/json"
+	"log"
+	"math/rand"
+	"net/http"
+	"os"
+	"time"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/minidevopshub/minidevopshub/internal/deployment"
+	"github.com/minidevopshub/minidevopshub/internal/service"
 )
 
 var (
-	appSvc        *service.InMemoryAppService
-	workerSvc     *service.InMemoryWorkerService
-	deploySvc     *service.InMemoryDeploymentService
-	logSvc        *service.InMemoryLogService
+	appSvc    *service.InMemoryAppService
+	workerSvc *service.InMemoryWorkerService
+	deploySvc *service.InMemoryDeploymentService
+	logSvc    *service.InMemoryLogService
 )
 
 func main() {
@@ -65,46 +70,40 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // --- App Handlers ---
+func listAppsHandler(w http.ResponseWriter, r *http.Request) {
+	// TODO: Implement listing apps
+	w.WriteHeader(http.StatusNotImplemented)
+	w.Write([]byte("listAppsHandler not implemented"))
+}
+
+func getAppHandler(w http.ResponseWriter, r *http.Request) {
+	// TODO: Implement get app
+	w.WriteHeader(http.StatusNotImplemented)
+	w.Write([]byte("getAppHandler not implemented"))
+}
+
+func deleteAppHandler(w http.ResponseWriter, r *http.Request) {
+	// TODO: Implement delete app
+	w.WriteHeader(http.StatusNotImplemented)
+	w.Write([]byte("deleteAppHandler not implemented"))
+}
+
+func createWorkerHandler(w http.ResponseWriter, r *http.Request) {
+	// TODO: Implement create worker
+	w.WriteHeader(http.StatusNotImplemented)
+	w.Write([]byte("createWorkerHandler not implemented"))
+}
 func createAppHandler(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Name     string `json:"name"`
-		RepoURL  string `json:"repo_url"`
-		Branch   string `json:"branch"`
+		Name    string `json:"name"`
+		RepoURL string `json:"repo_url"`
+		Branch  string `json:"branch"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
-
-	func main() {
-		log.Println("MiniDevOpsHub Control Plane starting (dashboard endpoints)...")
-		r := gin.Default()
-		api.RegisterRoutes(r)
-		port := os.Getenv("PORT")
-		if port == "" {
-			port = "8080"
-		}
-		log.Printf("Listening on :%s", port)
-		r.Run(":" + port)
-	}
-	var req struct {
-		Name string `json:"name"`
-		IP   string `json:"ip"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid request", http.StatusBadRequest)
-		return
-	}
-	id := randomID()
-	workerObj := &worker.Worker{
-		ID:     id,
-		Name:   req.Name,
-		IP:     req.IP,
-		Status: "active",
-	}
-	_ = workerSvc.CreateWorker(workerObj)
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(workerObj)
+	// ...existing logic for creating an app...
 }
 
 func listWorkersHandler(w http.ResponseWriter, r *http.Request) {
@@ -123,6 +122,7 @@ func getWorkerHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(workerObj)
 }
+
 // --- Utility ---
 func randomID() string {
 	const letters = "abcdefghijklmnopqrstuvwxyz0123456789"
@@ -147,7 +147,7 @@ func deployAppHandler(w http.ResponseWriter, r *http.Request) {
 		slot = "blue"
 	}
 	version := rand.Intn(100000)
-	dep := &service.Deployment{
+	dep := &deployment.Deployment{
 		ID:        randomID(),
 		AppID:     appID,
 		Version:   version,
@@ -208,4 +208,6 @@ func getBuildLogsHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // --- Repo Info Handler ---
-func getRepoInfoHandler(w http.ResponseWriter, r *http.Request)  { w.WriteHeader(http.StatusNotImplemented) }
+func getRepoInfoHandler(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}

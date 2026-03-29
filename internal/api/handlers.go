@@ -1,21 +1,21 @@
-import (
-	...existing code...
-	"github.com/minidevopshub/minidevopshub/internal/deployer"
-)
 package api
 
 import (
-	"net/http"
 	"encoding/json"
 	"io/ioutil"
+	"net/http"
+
+	"strconv"
+
 	"github.com/gin-gonic/gin"
-	"github.com/minidevopshub/minidevopshub/internal/ssh"
+	"github.com/minidevopshub/minidevopshub/internal/deployer"
 	"github.com/minidevopshub/minidevopshub/internal/docker"
+	"github.com/minidevopshub/minidevopshub/internal/ssh"
 )
 
 type DeployRequest struct {
-	RepoURL string `json:"repo_url"`
-	Branch  string `json:"branch"`
+	RepoURL   string `json:"repo_url"`
+	Branch    string `json:"branch"`
 	ProjectID string `json:"project_id"`
 }
 
@@ -35,7 +35,6 @@ type Worker struct {
 	Status   string `json:"status"`
 }
 
-
 // In-memory store for demo
 var projects = map[string]*Project{}
 var logs = map[string][]string{}
@@ -53,6 +52,7 @@ func RegisterRoutes(r *gin.Engine) {
 	r.GET("/repo/:project_id", getRepoInfo)
 	r.GET("/commits/:project_id", getCommitHistory)
 }
+
 // Simulate GitHub webhook handler
 func githubWebhook(c *gin.Context) {
 	// In production, validate signature and parse event
@@ -64,8 +64,8 @@ func getRepoInfo(c *gin.Context) {
 	id := c.Param("project_id")
 	if p, ok := projects[id]; ok {
 		c.JSON(http.StatusOK, gin.H{
-			"repo_url": p.RepoURL,
-			"branch": p.Branch,
+			"repo_url":    p.RepoURL,
+			"branch":      p.Branch,
 			"last_commit": "abc123",
 			"commit_time": "2026-03-29T12:00:00Z",
 		})
@@ -77,7 +77,7 @@ func getRepoInfo(c *gin.Context) {
 // Simulate commit history endpoint
 func getCommitHistory(c *gin.Context) {
 	id := c.Param("project_id")
-	if p, ok := projects[id]; ok {
+	if _, ok := projects[id]; ok {
 		c.JSON(http.StatusOK, []gin.H{
 			{"hash": "abc123", "msg": "Initial commit", "time": "2026-03-29T12:00:00Z"},
 			{"hash": "def456", "msg": "Add feature", "time": "2026-03-28T10:00:00Z"},
@@ -97,10 +97,10 @@ func getProjects(c *gin.Context) {
 
 func deployProject(c *gin.Context) {
 	var req struct {
-		RepoURL  string `json:"repo_url"`
-		Branch   string `json:"branch"`
+		RepoURL   string `json:"repo_url"`
+		Branch    string `json:"branch"`
 		ProjectID string `json:"project_id"`
-		WorkerID string `json:"worker_id"`
+		WorkerID  string `json:"worker_id"`
 	}
 	body, _ := ioutil.ReadAll(c.Request.Body)
 	_ = json.Unmarshal(body, &req)
@@ -125,14 +125,14 @@ func deployProject(c *gin.Context) {
 		return
 	}
 	// New deploy
-	id := "proj-" + string(len(projects)+1)
+	id := "proj-" + strconv.Itoa(len(projects)+1)
 	p := &Project{
 		ProjectID: id,
-		RepoURL: req.RepoURL,
-		Branch: req.Branch,
-		Port: 3000 + len(projects),
-		Status: "deploying",
-		WorkerID: req.WorkerID,
+		RepoURL:   req.RepoURL,
+		Branch:    req.Branch,
+		Port:      3000 + len(projects),
+		Status:    "deploying",
+		WorkerID:  req.WorkerID,
 	}
 	projects[id] = p
 	logs[id] = []string{"Deployment started..."}
@@ -144,10 +144,16 @@ func deployProject(c *gin.Context) {
 	p.Status = "running"
 	logs[id] = append(logs[id], "Deployment finished!")
 	// Update NGINX config for all live projects
-	liveProjects := map[string]struct{ Port int; ProjectID string }{}
+	liveProjects := map[string]struct {
+		Port      int
+		ProjectID string
+	}{}
 	for _, proj := range projects {
 		if proj.Status == "running" {
-			liveProjects[proj.ProjectID] = struct{ Port int; ProjectID string }{Port: proj.Port, ProjectID: proj.ProjectID}
+			liveProjects[proj.ProjectID] = struct {
+				Port      int
+				ProjectID string
+			}{Port: proj.Port, ProjectID: proj.ProjectID}
 		}
 	}
 	deployer.GenerateNginxConfig(liveProjects)
@@ -171,19 +177,21 @@ func registerWorker(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
 		return
 	}
-	id := "worker-" + string(len(workers)+1)
+	id := "worker-" + strconv.Itoa(len(workers)+1)
 	w := &Worker{
 		WorkerID: id,
-		Name: req.Name,
-		IP: req.IP,
-		Status: "active",
+		Name:     req.Name,
+		IP:       req.IP,
+		Status:   "active",
 	}
 	workers[id] = w
 	c.JSON(http.StatusOK, w)
 }
 
 func cleanupProject(c *gin.Context) {
-	var req struct{ ProjectID string `json:"project_id"` }
+	var req struct {
+		ProjectID string `json:"project_id"`
+	}
 	if err := c.BindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
 		return
@@ -198,7 +206,9 @@ func cleanupProject(c *gin.Context) {
 }
 
 func rollbackProject(c *gin.Context) {
-	var req struct{ ProjectID string `json:"project_id"` }
+	var req struct {
+		ProjectID string `json:"project_id"`
+	}
 	if err := c.BindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
 		return

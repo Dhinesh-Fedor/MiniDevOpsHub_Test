@@ -1,8 +1,6 @@
 package main
 
-import (
-	"net/http"
-)
+// ...existing code...
 
 import (
 	"bytes"
@@ -101,7 +99,9 @@ func deployHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func cleanupHandler(w http.ResponseWriter, r *http.Request) {
-	var req struct{ App string `json:"app"` }
+	var req struct {
+		App string `json:"app"`
+	}
 	json.NewDecoder(r.Body).Decode(&req)
 	app, ok := apps[req.App]
 	if !ok {
@@ -114,7 +114,9 @@ func cleanupHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func rollbackHandler(w http.ResponseWriter, r *http.Request) {
-	var req struct{ App string `json:"app"` }
+	var req struct {
+		App string `json:"app"`
+	}
 	json.NewDecoder(r.Body).Decode(&req)
 	app, ok := apps[req.App]
 	if !ok {
