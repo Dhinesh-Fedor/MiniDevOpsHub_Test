@@ -633,8 +633,12 @@ func removeProjectNginxConfig(projectID string) error {
 }
 
 func reloadNginx() error {
-	cmd := exec.Command("nginx", "-s", "reload")
+	cmd := exec.Command("sudo", "systemctl", "reload", "nginx")
 	output, err := cmd.CombinedOutput()
+	if err != nil {
+		cmd = exec.Command("sudo", "systemctl", "start", "nginx")
+		output, err = cmd.CombinedOutput()
+	}
 	if err != nil {
 		cmd = exec.Command("sudo", "nginx", "-s", "reload")
 		output, err = cmd.CombinedOutput()
