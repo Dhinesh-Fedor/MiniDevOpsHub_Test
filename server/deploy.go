@@ -29,7 +29,7 @@ const defaultLogSlot = "default"
 const (
 	sshUser         = "ubuntu"
 	sshKeyPath      = "/home/ubuntu/MiniDevOpsHub-Key.pem"
-	nginxSitesDir   = "/etc/nginx/sites-enabled"
+	nginxRoutesDir  = "/etc/nginx/minidevopshub-routes"
 	defaultPortBase = 18080
 )
 
@@ -250,6 +250,14 @@ func buildLiveURL(r *http.Request, projectID string) string {
 	return fmt.Sprintf("http://%s/%s/", publicHost(r), projectID)
 }
 
+func resolvedLiveURL(albHost, workerIP string, port int, projectID string) string {
+	albHost = strings.TrimSpace(albHost)
+	if albHost != "" {
+		return fmt.Sprintf("http://%s/%s/", albHost, projectID)
+	}
+	return fmt.Sprintf("http://%s:%d/", workerIP, port)
+}
+
 func sanitizeName(input string) string {
 	re := regexp.MustCompile(`[^a-zA-Z0-9_.-]+`)
 	cleaned := strings.ToLower(re.ReplaceAllString(input, "-"))
@@ -302,9 +310,6 @@ func createOrUpdateProject(repoURL, branch, workerID, projectID string, requestH
 
 	hostPort := port
 	albHost := strings.TrimSpace(os.Getenv("ALB_HOST"))
-	if albHost == "" {
-		albHost = requestHost
-	}
 
 	project := &App{
 		ProjectID:     projectID,
@@ -316,7 +321,7 @@ func createOrUpdateProject(repoURL, branch, workerID, projectID string, requestH
 		WorkerIP:      worker.IP,
 		Status:        "building",
 		Port:          hostPort,
-		LiveURL:       fmt.Sprintf("http://%s/%s/", albHost, projectID),
+		LiveURL:       resolvedLiveURL(albHost, worker.IP, hostPort, projectID),
 		WorkspaceDir:  workspacePath,
 		ImageName:     imageName,
 		ContainerName: containerName,
@@ -404,14 +409,14 @@ func runDeploy(projectID, repoURL, branch, workerID, requestHost string, port in
 		return
 	}
 	project.Port = port
-	project.LiveURL = fmt.Sprintf("http://%s/%s/", requestHost, projectID)
+	project.LiveURL = resolvedLiveURL(requestHost, workerIP, port, projectID)
 	if err := writeProjectNginxConfig(project); err != nil {
 		markProjectFailed(projectID, err)
 		return
 	}
 
 	updateProjectStatus(projectID, "running")
-	updateProjectLiveURL(projectID, fmt.Sprintf("http://%s/%s/", requestHost, projectID))
+	updateProjectLiveURL(projectID, resolvedLiveURL(requestHost, workerIP, port, projectID))
 	version := nextDeploymentVersion(projectID)
 	_ = deploySvc.CreateDeployment(&deployment.Deployment{
 		ID:        randomID(),
@@ -583,13 +588,19 @@ func writeProjectNginxConfig(project *App) error {
 	if project == nil {
 		return nil
 	}
+	if err := os.MkdirAll(nginxRoutesDir, 0755); err != nil {
+		cmd := exec.Command("sudo", "mkdir", "-p", nginxRoutesDir)
+		if out, sudoErr := cmd.CombinedOutput(); sudoErr != nil {
+			return fmt.Errorf("create nginx routes dir failed: %v (%s)", sudoErr, strings.TrimSpace(string(out)))
+		}
+	}
 	conf := fmt.Sprintf(
 		"location /%s/ {\n    proxy_pass http://%s:%d/;\n    proxy_set_header Host $host;\n    proxy_set_header X-Real-IP $remote_addr;\n}\n",
 		project.ProjectID,
 		project.WorkerIP,
 		project.Port,
 	)
-	confPath := fmt.Sprintf("%s/%s.conf", nginxSitesDir, project.ProjectID)
+	confPath := fmt.Sprintf("%s/%s.conf", nginxRoutesDir, project.ProjectID)
 	if err := os.WriteFile(confPath, []byte(conf), 0644); err == nil {
 		return nil
 	}
@@ -606,7 +617,7 @@ func writeProjectNginxConfig(project *App) error {
 }
 
 func removeProjectNginxConfig(projectID string) error {
-	confPath := fmt.Sprintf("%s/%s.conf", nginxSitesDir, projectID)
+	confPath := fmt.Sprintf("%s/%s.conf", nginxRoutesDir, projectID)
 	if err := os.Remove(confPath); err == nil || os.IsNotExist(err) {
 		return nil
 	}

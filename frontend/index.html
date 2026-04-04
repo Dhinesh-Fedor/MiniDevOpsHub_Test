@@ -268,7 +268,8 @@
     .badge .dot { width: 8px; height: 8px; }
 
     .table-wrap {
-      overflow: auto;
+      overflow-y: auto;
+      overflow-x: hidden;
       border-radius: 18px;
       border: 1px solid rgba(145, 168, 255, 0.12);
       max-height: 440px;
@@ -277,7 +278,8 @@
     table {
       width: 100%;
       border-collapse: collapse;
-      min-width: 980px;
+      min-width: 0;
+      table-layout: fixed;
       background: rgba(7, 11, 22, 0.66);
     }
 
@@ -296,6 +298,7 @@
       padding: 14px 16px;
       border-bottom: 1px solid rgba(145, 168, 255, 0.1);
       vertical-align: middle;
+      word-break: break-word;
     }
 
     tbody tr:hover { background: rgba(255,255,255,0.02); }
@@ -749,10 +752,11 @@
       startLogPolling(project);
     }
 
-    function openProject(projectId) {
-      const link = document.querySelector(`a[href$="/${projectId}/"]`);
-      if (link) {
-        window.open(link.href, '_blank', 'noopener');
+    async function openProject(projectId) {
+      const projects = await requestJSON('/projects');
+      const project = projects.find((item) => item.project_id === projectId);
+      if (project && project.live_url) {
+        window.open(project.live_url, '_blank', 'noopener');
       }
     }
 
