@@ -11,6 +11,7 @@ import (
 	"path"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"github.com/minidevopshub/minidevopshub/internal/deployment"
 	internaldocker "github.com/minidevopshub/minidevopshub/internal/docker"
 	"github.com/minidevopshub/minidevopshub/internal/service"
+	"github.com/minidevopshub/minidevopshub/internal/ssh"
 	"github.com/minidevopshub/minidevopshub/internal/storage"
 	internalworker "github.com/minidevopshub/minidevopshub/internal/worker"
 )
@@ -31,6 +33,7 @@ var (
 	deploySvc   = service.NewInMemoryDeploymentService()
 	logSvc      = service.NewInMemoryLogService()
 	dockerSvc   = internaldocker.NewDockerService()
+	sshSvc      = ssh.NewSSHService()
 	projectLogs = map[string][]string{}
 )
 
@@ -78,9 +81,9 @@ func seedDefaultWorkers() {
 	if len(workers) > 0 {
 		return
 	}
-	_ = workerSvc.CreateWorker(&internalworker.Worker{ID: "worker-1", Name: "worker-1", IP: "127.0.0.1", Status: "active"})
-	_ = workerSvc.CreateWorker(&internalworker.Worker{ID: "worker-2", Name: "worker-2", IP: "127.0.0.1", Status: "active"})
-	_ = workerSvc.CreateWorker(&internalworker.Worker{ID: "worker-3", Name: "worker-3", IP: "127.0.0.1", Status: "active"})
+	_ = workerSvc.CreateWorker(&internalworker.Worker{ID: "worker-1", Name: "worker-1", IP: "172.31.37.159", Status: "active", ActiveJobs: 0})
+	_ = workerSvc.CreateWorker(&internalworker.Worker{ID: "worker-2", Name: "worker-2", IP: "172.31.36.202", Status: "active", ActiveJobs: 0})
+	_ = workerSvc.CreateWorker(&internalworker.Worker{ID: "worker-3", Name: "worker-3", IP: "172.31.46.150", Status: "active", ActiveJobs: 0})
 }
 
 func saveDashboardState() {
@@ -165,26 +168,38 @@ func createOrUpdateProject(repoURL, branch, workerID, projectID string, requestH
 	if projectID == "" {
 		projectID = randomID()
 	}
+
 	worker, err := workerSvc.GetWorker(workerID)
 	if err != nil {
 		return nil, err
 	}
 
+	// If project exists, remove old artifacts from worker
 	if existing, ok := projects[projectID]; ok {
-		_ = removeRuntimeArtifacts(existing, true)
+		_ = removeRuntimeArtifactsSSH(existing)
 	}
 
-	workspaceDir, err := os.MkdirTemp("", fmt.Sprintf("minidevopshub-%s-", sanitizeName(projectName)))
-	if err != nil {
-		return nil, err
-	}
-	hostPort, logs, err := dockerSvc.BuildAndRunContainer(repoURL, branch, projectName, projectID, workspaceDir)
-	storeProjectLogs(projectID, logs)
-	if err != nil {
-		return nil, err
-	}
+	// Create deployment script to run on worker
 	imageName := fmt.Sprintf("minidevopshub-%s-%s", sanitizeName(projectName), projectID)
 	containerName := imageName
+	workspacePath := fmt.Sprintf("/tmp/%s", projectID)
+
+	deployScript := generateDeploymentScript(repoURL, branch, projectID, workspacePath, imageName, containerName)
+
+	// Execute deployment script on worker via SSH
+	output, err := sshSvc.ExecuteDeploymentScript(worker.IP, "root", "", deployScript)
+	logs := ssh.ParseLogsFromOutput(output)
+	storeProjectLogs(projectID, logs)
+
+	if err != nil {
+		return nil, fmt.Errorf("deployment on worker %s failed: %w", workerID, err)
+	}
+
+	// Extract port from output (last line should be the port)
+	hostPort := extractPortFromOutput(output)
+	if hostPort == 0 {
+		return nil, fmt.Errorf("failed to determine container port from deployment output")
+	}
 
 	project := &App{
 		ProjectID:     projectID,
@@ -197,12 +212,12 @@ func createOrUpdateProject(repoURL, branch, workerID, projectID string, requestH
 		Status:        "running",
 		Port:          hostPort,
 		LiveURL:       fmt.Sprintf("http://%s/%s/", requestHost, projectID),
-		WorkspaceDir:  workspaceDir,
+		WorkspaceDir:  workspacePath,
 		ImageName:     imageName,
 		ContainerName: containerName,
 	}
+
 	projects[projectID] = project
-	_ = workerSvc.UpdateWorker(&internalworker.Worker{ID: worker.ID, Name: worker.Name, IP: worker.IP, Status: "busy"})
 	_ = deploySvc.RecordLastConfig(projectID, &service.DeployConfig{
 		ProjectID:     projectID,
 		RepoURL:       repoURL,
@@ -211,7 +226,7 @@ func createOrUpdateProject(repoURL, branch, workerID, projectID string, requestH
 		WorkerIP:      worker.IP,
 		ImageName:     project.ImageName,
 		ContainerName: project.ContainerName,
-		WorkspaceDir:  workspaceDir,
+		WorkspaceDir:  workspacePath,
 		HostPort:      hostPort,
 		ContainerPort: 3000,
 	})
@@ -226,6 +241,118 @@ func createOrUpdateProject(repoURL, branch, workerID, projectID string, requestH
 	updateNginxConfig()
 	saveDashboardState()
 	return project, nil
+}
+
+func generateDeploymentScript(repoURL, branch, projectID, workspacePath, imageName, containerName string) string {
+	// Script to be executed on the worker node
+	script := fmt.Sprintf(`#!/bin/bash
+set -e
+echo "[INFO] Starting deployment for project %s"
+echo "[INFO] Repository: %s"
+echo "[INFO] Branch: %s"
+
+# Cleanup old deployment if exists
+echo "[INFO] Cleaning up old deployment..."
+rm -rf %s || true
+mkdir -p %s
+cd %s
+
+# Clone repository
+echo "[INFO] Cloning repository..."
+git clone --branch %s %s .
+
+# Detect container port from Dockerfile
+echo "[INFO] Building Docker image..."
+CONTAINER_PORT=$(grep -i "^EXPOSE" Dockerfile | awk '{print $2}' | head -1 || echo "3000")
+echo "[INFO] Container port: $CONTAINER_PORT"
+
+# Build Docker image
+docker build -t %s .
+
+# Find available port on host
+echo "[INFO] Finding available host port..."
+HOST_PORT=8000
+for port in {8000..8100}; do
+  if ! netstat -tuln 2>/dev/null | grep -q ":$port "; then
+    HOST_PORT=$port
+    break
+  fi
+done
+echo "[INFO] Using host port: $HOST_PORT"
+
+# Stop and remove old container if exists
+docker ps -a | grep %s && docker stop %s && docker rm %s || true
+
+# Run Docker container
+echo "[INFO] Running Docker container..."
+docker run -d -p $HOST_PORT:$CONTAINER_PORT %s
+
+echo "[INFO] Deployment successful"
+echo "[PORT] $HOST_PORT"
+`, projectID, repoURL, branch, workspacePath, workspacePath, workspacePath, branch, repoURL, imageName, containerName, containerName, containerName, imageName)
+
+	return script
+}
+
+func extractPortFromOutput(output string) int {
+	lines := strings.Split(output, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if strings.HasPrefix(line, "[PORT]") {
+			parts := strings.Fields(line)
+			if len(parts) >= 2 {
+				if port, err := strconv.Atoi(parts[1]); err == nil {
+					return port
+				}
+			}
+		}
+	}
+	return 0
+}
+
+func removeRuntimeArtifactsSSH(project *App) error {
+	if project == nil {
+		return nil
+	}
+
+	worker, err := workerSvc.GetWorker(project.WorkerID)
+	if err != nil {
+		return err
+	}
+
+	// Create cleanup script
+	cleanupScript := fmt.Sprintf(`#!/bin/bash
+set -e
+echo "[INFO] Cleaning up project %s on worker..."
+docker ps -a | grep %s && docker stop %s && docker rm %s || true
+docker rmi %s || true
+rm -rf %s || true
+echo "[INFO] Cleanup complete"
+`, project.ProjectID, project.ContainerName, project.ContainerName, project.ContainerName, project.ImageName, project.WorkspaceDir)
+
+	_, err = sshSvc.ExecuteDeploymentScript(worker.IP, "root", "", cleanupScript)
+	return err
+}
+
+func removeRuntimeArtifacts(project *App, removeWorkspace bool) error {
+	if project == nil {
+		return nil
+	}
+	// Try SSH cleanup first (worker-based cleanup)
+	_ = removeRuntimeArtifactsSSH(project)
+
+	// Also try local cleanup for backward compatibility
+	if project.ContainerName != "" {
+		_ = runShellCommand("docker", "stop", project.ContainerName)
+		_ = runShellCommand("docker", "rm", "-f", project.ContainerName)
+	}
+	if project.ImageName != "" {
+		_ = runShellCommand("docker", "rmi", "-f", project.ImageName)
+	}
+	if removeWorkspace && project.WorkspaceDir != "" {
+		_ = os.RemoveAll(project.WorkspaceDir)
+	}
+	return nil
 }
 
 func redeployProject(projectID string, requestHost string) (*App, error) {
@@ -248,26 +375,6 @@ func rollbackProject(projectID string, requestHost string) (*App, error) {
 		return nil, service.ErrNotFound
 	}
 	return createOrUpdateProject(config.RepoURL, config.Branch, config.WorkerID, projectID, requestHost)
-}
-
-func removeRuntimeArtifacts(project *App, removeWorkspace bool) error {
-	if project == nil {
-		return nil
-	}
-	if project.ContainerName != "" {
-		_ = runShellCommand("docker", "stop", project.ContainerName)
-		_ = runShellCommand("docker", "rm", "-f", project.ContainerName)
-	}
-	if project.ImageName != "" {
-		_ = runShellCommand("docker", "rmi", "-f", project.ImageName)
-	}
-	if removeWorkspace && project.WorkspaceDir != "" {
-		_ = os.RemoveAll(project.WorkspaceDir)
-	}
-	if worker, err := workerSvc.GetWorker(project.WorkerID); err == nil {
-		_ = workerSvc.UpdateWorker(&internalworker.Worker{ID: worker.ID, Name: worker.Name, IP: worker.IP, Status: "active"})
-	}
-	return nil
 }
 
 func cleanProject(projectID string) error {

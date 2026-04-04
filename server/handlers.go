@@ -50,6 +50,28 @@ func deployHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "repo_url and worker_id are required", http.StatusBadRequest)
 		return
 	}
+
+	// Check if worker exists and is available
+	selectedWorker, err := workerSvc.GetWorker(req.WorkerID)
+	if err != nil {
+		http.Error(w, "worker not found", http.StatusNotFound)
+		return
+	}
+	if !selectedWorker.IsAvailable() {
+		http.Error(w, fmt.Sprintf("worker %s is busy", req.WorkerID), http.StatusConflict)
+		return
+	}
+
+	// Mark worker as busy
+	selectedWorker.ActiveJobs++
+	_ = workerSvc.UpdateWorker(selectedWorker)
+	defer func() {
+		// Mark worker as available when deploy completes
+		selectedWorker.ActiveJobs--
+		_ = workerSvc.UpdateWorker(selectedWorker)
+		saveDashboardState()
+	}()
+
 	project, err := createOrUpdateProject(req.RepoURL, req.Branch, req.WorkerID, req.ProjectID, publicHost(r))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -70,10 +92,26 @@ func cleanupHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "project id required", http.StatusBadRequest)
 		return
 	}
+
+	// Get project to find worker
+	project, ok := projects[projectID]
+	if !ok {
+		http.Error(w, "project not found", http.StatusNotFound)
+		return
+	}
+
 	if err := cleanProject(projectID); err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
+
+	// Decrement worker's active_jobs after cleanup
+	if worker, err := workerSvc.GetWorker(project.WorkerID); err == nil && worker.ActiveJobs > 0 {
+		worker.ActiveJobs--
+		_ = workerSvc.UpdateWorker(worker)
+		saveDashboardState()
+	}
+
 	writeJSON(w, http.StatusOK, map[string]string{"status": "cleaned", "project_id": projectID})
 }
 
@@ -93,12 +131,36 @@ func rollbackHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "project id required", http.StatusBadRequest)
 		return
 	}
-	project, err := rollbackProject(projectID, publicHost(r))
+
+	// Get project to find worker
+	project, ok := projects[projectID]
+	if !ok {
+		http.Error(w, "project not found", http.StatusNotFound)
+		return
+	}
+
+	// Mark worker as busy for rollback operation
+	worker, err := workerSvc.GetWorker(project.WorkerID)
+	if err != nil {
+		http.Error(w, "worker not found", http.StatusNotFound)
+		return
+	}
+
+	worker.ActiveJobs++
+	_ = workerSvc.UpdateWorker(worker)
+	defer func() {
+		// Mark worker as available when rollback completes
+		worker.ActiveJobs--
+		_ = workerSvc.UpdateWorker(worker)
+		saveDashboardState()
+	}()
+
+	rolledBackProject, err := rollbackProject(projectID, publicHost(r))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
-	writeJSON(w, http.StatusOK, DeployResponse{ProjectID: project.ProjectID, LiveURL: project.LiveURL})
+	writeJSON(w, http.StatusOK, DeployResponse{ProjectID: rolledBackProject.ProjectID, LiveURL: rolledBackProject.LiveURL})
 }
 
 func rollbackProjectHandler(w http.ResponseWriter, r *http.Request) {
@@ -151,7 +213,14 @@ func workersHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		writeJSON(w, http.StatusOK, workers)
+		// Filter and return only available workers (active_jobs == 0)
+		availableWorkers := []*worker.Worker{}
+		for _, w := range workers {
+			if w.IsAvailable() {
+				availableWorkers = append(availableWorkers, w)
+			}
+		}
+		writeJSON(w, http.StatusOK, availableWorkers)
 	case http.MethodPost:
 		var req struct {
 			Name string `json:"name"`
