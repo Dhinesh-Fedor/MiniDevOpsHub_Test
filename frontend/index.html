@@ -263,6 +263,7 @@
       overflow: auto;
       border-radius: 18px;
       border: 1px solid rgba(145, 168, 255, 0.12);
+      max-height: 440px;
     }
 
     table {
@@ -290,6 +291,17 @@
     }
 
     tbody tr:hover { background: rgba(255,255,255,0.02); }
+    tbody tr.selected-row { background: rgba(110, 168, 255, 0.14); }
+
+    .project-id-link {
+      color: var(--accent);
+      cursor: pointer;
+      text-decoration: underline;
+      background: transparent;
+      border: none;
+      padding: 0;
+      font: inherit;
+    }
 
     .status {
       display: inline-flex;
@@ -360,7 +372,7 @@
       display: grid;
       grid-template-rows: auto auto 1fr auto;
       gap: 12px;
-      min-height: 640px;
+      min-height: 460px;
     }
 
     .logs-meta {
@@ -371,8 +383,8 @@
     }
 
     .logs {
-      min-height: 470px;
-      max-height: 470px;
+      min-height: 300px;
+      max-height: 320px;
       overflow: auto;
       padding: 14px;
       border-radius: 16px;
@@ -544,7 +556,9 @@
     const state = {
       selectedProjectId: null,
       logTimer: null,
-      logText: ""
+      logText: "",
+      followLogs: true,
+      selectedProjectLiveURL: "",
     };
 
     function getByAnyId(ids) {
@@ -575,6 +589,7 @@
 
     function setSelectedProject(project) {
       state.selectedProjectId = project ? project.project_id : null;
+      state.selectedProjectLiveURL = project && project.live_url ? project.live_url : "";
       const chip = document.getElementById('selected-project-chip');
       const label = document.getElementById('selected-project-label');
       const logsProjectLabel = document.getElementById('logs-project-label');
@@ -590,6 +605,10 @@
       label.textContent = `${project.name} (${project.project_id})`;
       logsProjectLabel.textContent = project.project_id;
       liveUrl.textContent = project.live_url || '--';
+
+      document.querySelectorAll('#projects-body tr').forEach((row) => {
+        row.classList.toggle('selected-row', row.getAttribute('data-project-id') === project.project_id);
+      });
     }
 
     async function checkConnection() {
@@ -607,6 +626,7 @@
 
     async function loadWorkers() {
       const workers = await requestJSON('/workers');
+      workers.sort((a, b) => (a.id || '').localeCompare(b.id || ''));
       const workerSelect = document.getElementById('worker-select');
       const workersList = document.getElementById('workers-list');
       workerSelect.innerHTML = '';
@@ -643,13 +663,20 @@
     async function loadProjects() {
       const projects = await requestJSON('/projects');
       const tbody = document.getElementById('projects-body');
+      const tableWrap = document.querySelector('.table-wrap');
+      const prevScrollTop = tableWrap ? tableWrap.scrollTop : 0;
       tbody.innerHTML = '';
       document.getElementById('project-count').textContent = `${projects.length} project${projects.length === 1 ? '' : 's'}`;
 
       projects.forEach((project) => {
         const row = document.createElement('tr');
+        row.setAttribute('data-project-id', project.project_id);
+        if (state.selectedProjectId === project.project_id) {
+          row.classList.add('selected-row');
+        }
+        row.addEventListener('click', () => selectProject(project.project_id));
         row.innerHTML = `
-          <td>${project.project_id}</td>
+          <td><button class="project-id-link" type="button" onclick="event.stopPropagation(); selectProject('${project.project_id}')">${project.project_id}</button></td>
           <td>${project.name || project.repo_url || project.project_id}</td>
           <td>${project.worker_name || project.worker_id || '--'}</td>
           <td><span class="status ${project.status || ''}"><span class="dot connected"></span>${project.status || 'unknown'}</span></td>
@@ -658,16 +685,20 @@
             <details class="actions">
               <summary>Actions</summary>
               <div class="menu">
-                <button type="button" onclick="openProject('${project.project_id}')">Open</button>
-                <button type="button" onclick="selectProject('${project.project_id}')">Logs</button>
-                <button type="button" onclick="rollbackProject('${project.project_id}')">Rollback</button>
-                <button type="button" onclick="cleanProject('${project.project_id}')">Clean</button>
+                <button type="button" onclick="event.stopPropagation(); openProject('${project.project_id}')">Open</button>
+                <button type="button" onclick="event.stopPropagation(); selectProject('${project.project_id}')">Logs</button>
+                <button type="button" onclick="event.stopPropagation(); rollbackProject('${project.project_id}')">Rollback</button>
+                <button type="button" onclick="event.stopPropagation(); cleanProject('${project.project_id}')">Clean</button>
               </div>
             </details>
           </td>
         `;
         tbody.appendChild(row);
       });
+
+      if (tableWrap) {
+        tableWrap.scrollTop = prevScrollTop;
+      }
     }
 
     async function refreshLogs() {
@@ -679,8 +710,12 @@
         const logs = Array.isArray(lines) ? lines : lines.lines || [];
         state.logText = logs.join('\n');
         const box = document.getElementById('logs');
+        const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 24;
         box.textContent = state.logText || 'No logs found.';
-        box.scrollTop = box.scrollHeight;
+        if (state.followLogs || nearBottom) {
+          box.scrollTop = box.scrollHeight;
+          state.followLogs = true;
+        }
         document.getElementById('logs-state').textContent = 'Polling on';
       } catch (error) {
         document.getElementById('logs').textContent = error.message;
@@ -691,6 +726,7 @@
     function startLogPolling(project) {
       clearInterval(state.logTimer);
       setSelectedProject(project);
+      state.followLogs = true;
       document.getElementById('logs-state').textContent = 'Polling on';
       refreshLogs();
       state.logTimer = setInterval(refreshLogs, 2000);
@@ -752,8 +788,10 @@
       const tbody = document.getElementById('projects-body');
       const row = document.createElement('tr');
       row.setAttribute('data-project-id', projectId);
+      row.classList.add('selected-row');
+      row.addEventListener('click', () => selectProject(projectId));
       row.innerHTML = `
-        <td>${projectId}</td>
+        <td><button class="project-id-link" type="button" onclick="event.stopPropagation(); selectProject('${projectId}')">${projectId}</button></td>
         <td>${repoUrl || projectId}</td>
         <td>${workerId || '--'}</td>
         <td><span class="status building"><span class="dot"></span>building</span></td>
@@ -781,9 +819,6 @@
         live_url: response.live_url || '--',
       });
       await addProjectRow(response.project_id, response.worker, response.live_url || '--');
-      if (response.live_url) {
-        window.open(response.live_url, '_blank', 'noopener');
-      }
       await loadWorkers();
       const projects = await requestJSON('/projects');
       const project = projects.find((item) => item.project_id === response.project_id);
@@ -802,14 +837,29 @@
 
     document.getElementById('clear-logs-btn').addEventListener('click', () => {
       state.selectedProjectId = null;
+      state.followLogs = true;
       clearInterval(state.logTimer);
       setSelectedProject(null);
       document.getElementById('logs').textContent = 'Logs cleared locally. Select a project to start polling again.';
       document.getElementById('logs-state').textContent = 'Polling off';
     });
 
+    document.getElementById('logs').addEventListener('scroll', (event) => {
+      const box = event.target;
+      const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 24;
+      state.followLogs = nearBottom;
+    });
+
+    function hasOpenActionMenu() {
+      return document.querySelector('details.actions[open]') !== null;
+    }
+
     setInterval(checkConnection, 5000);
-    setInterval(loadProjects, 5000);
+    setInterval(() => {
+      if (!hasOpenActionMenu()) {
+        loadProjects();
+      }
+    }, 5000);
     setInterval(loadWorkers, 10000);
 
     (async () => {

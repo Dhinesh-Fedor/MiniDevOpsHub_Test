@@ -438,8 +438,26 @@ rm -rf /tmp/%[1]s
 cd /tmp/%[1]s
 if [ -f Dockerfile ]; then
   echo "[INFO] Dockerfile detected"
-  docker build -t app-%[1]s .
-  docker run -d --name app-%[1]s -p %[3]d:8080 app-%[1]s
+	if docker build -t app-%[1]s .; then
+		docker run -d --name app-%[1]s -p %[3]d:8080 app-%[1]s
+	else
+		echo "[WARN] Docker build failed, checking fallback modes"
+		if [ -f build.sh ]; then
+			echo "[INFO] fallback build.sh detected"
+			chmod +x build.sh
+			./build.sh
+		else
+			PKG_FILE=$(find . -maxdepth 3 -name package.json | head -1)
+			if [ -n "$PKG_FILE" ]; then
+				APP_DIR=$(dirname "$PKG_FILE")
+				echo "[INFO] fallback package.json detected at $APP_DIR"
+				docker run -d --name app-%[1]s -p %[3]d:3000 -v /tmp/%[1]s/$APP_DIR:/app -w /app node:18 sh -c "npm install && npm start"
+			else
+				echo "No supported build configuration found" >&2
+				exit 1
+			fi
+		fi
+	fi
 elif [ -f build.sh ]; then
   echo "[INFO] build.sh detected"
   chmod +x build.sh
@@ -448,8 +466,15 @@ elif [ -f package.json ]; then
   echo "[INFO] package.json detected"
   docker run -d --name app-%[1]s -p %[3]d:3000 -v /tmp/%[1]s:/app -w /app node:18 sh -c "npm install && npm start"
 else
-  echo "No supported build configuration found" >&2
-  exit 1
+	PKG_FILE=$(find . -maxdepth 3 -name package.json | head -1)
+	if [ -n "$PKG_FILE" ]; then
+		APP_DIR=$(dirname "$PKG_FILE")
+		echo "[INFO] package.json detected at $APP_DIR"
+		docker run -d --name app-%[1]s -p %[3]d:3000 -v /tmp/%[1]s/$APP_DIR:/app -w /app node:18 sh -c "npm install && npm start"
+	else
+		echo "No supported build configuration found" >&2
+		exit 1
+	fi
 fi
 `, projectID, cloneCmd, port)
 }
@@ -478,13 +503,16 @@ func removeRuntimeArtifactsSSH(project *App) error {
 	}
 
 	cleanupCmd := fmt.Sprintf(
-		"docker stop app-%[1]s && docker rm app-%[1]s && docker rmi app-%[1]s && rm -rf /tmp/%[1]s",
+		"docker stop app-%[1]s >/dev/null 2>&1 || true; docker rm app-%[1]s >/dev/null 2>&1 || true; docker rmi app-%[1]s >/dev/null 2>&1 || true; rm -rf /tmp/%[1]s || true",
 		project.ProjectID,
 	)
 	output, err := sshSvc.RunCommand(worker.IP, sshUser, sshKeyPath, cleanupCmd)
 	storeProjectLogs(project.ProjectID, ssh.ParseLogsFromOutput(output))
 	log.Printf("clean project=%s worker=%s ip=%s output=%s", project.ProjectID, project.WorkerID, worker.IP, output)
-	return err
+	if err != nil {
+		appendProjectLogLine(project.ProjectID, fmt.Sprintf("[WARN] cleanup command returned error: %v", err))
+	}
+	return nil
 }
 
 func removeRuntimeArtifacts(project *App, removeWorkspace bool) error {
@@ -528,7 +556,7 @@ func cleanProject(projectID string) error {
 		return service.ErrNotFound
 	}
 	if err := removeRuntimeArtifacts(project, true); err != nil {
-		return err
+		appendProjectLogLine(projectID, fmt.Sprintf("[WARN] cleanup artifacts error: %v", err))
 	}
 	deleteProject(projectID)
 	logsMu.Lock()

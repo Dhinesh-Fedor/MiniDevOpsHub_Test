@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -238,6 +239,9 @@ func workersHandler(w http.ResponseWriter, r *http.Request) {
 				availableWorkers = append(availableWorkers, w)
 			}
 		}
+		sort.Slice(availableWorkers, func(i, j int) bool {
+			return availableWorkers[i].ID < availableWorkers[j].ID
+		})
 		writeJSON(w, http.StatusOK, availableWorkers)
 	case http.MethodPost:
 		var req struct {
