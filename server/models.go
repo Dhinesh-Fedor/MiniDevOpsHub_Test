@@ -26,6 +26,8 @@ type DeployRequest struct {
 
 type DeployResponse struct {
 	ProjectID string `json:"project_id"`
+	Worker    string `json:"worker,omitempty"`
+	Port      string `json:"port,omitempty"`
 	LiveURL   string `json:"live_url"`
 }
 

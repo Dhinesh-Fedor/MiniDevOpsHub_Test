@@ -4,20 +4,18 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
 	"path"
 	"regexp"
-	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/minidevopshub/minidevopshub/internal/deployment"
-	internaldocker "github.com/minidevopshub/minidevopshub/internal/docker"
 	"github.com/minidevopshub/minidevopshub/internal/service"
 	"github.com/minidevopshub/minidevopshub/internal/ssh"
 	"github.com/minidevopshub/minidevopshub/internal/storage"
@@ -26,13 +24,25 @@ import (
 
 const defaultLogSlot = "default"
 
+const (
+	sshUser         = "ubuntu"
+	sshKeyPath      = "/home/ubuntu/MiniDevOpsHub-Key.pem"
+	nginxSitesDir   = "/etc/nginx/sites-enabled"
+	defaultPortBase = 18080
+)
+
+var workerIPs = map[string]string{
+	"worker-1": "172.31.37.159",
+	"worker-2": "172.31.36.202",
+	"worker-3": "172.31.46.150",
+}
+
 var (
 	stateStore  = storage.NewFileStorage("minidevopshub-state.json")
 	stateMu     sync.Mutex
 	workerSvc   = service.NewInMemoryWorkerService()
 	deploySvc   = service.NewInMemoryDeploymentService()
 	logSvc      = service.NewInMemoryLogService()
-	dockerSvc   = internaldocker.NewDockerService()
 	sshSvc      = ssh.NewSSHService()
 	projectLogs = map[string][]string{}
 )
@@ -169,36 +179,42 @@ func createOrUpdateProject(repoURL, branch, workerID, projectID string, requestH
 		projectID = randomID()
 	}
 
+	workerIP, ok := workerIPs[workerID]
+	if !ok {
+		return nil, fmt.Errorf("unknown worker_id: %s", workerID)
+	}
 	worker, err := workerSvc.GetWorker(workerID)
 	if err != nil {
-		return nil, err
+		worker = &internalworker.Worker{ID: workerID, Name: workerID, IP: workerIP, Status: "active", ActiveJobs: 0}
+		_ = workerSvc.CreateWorker(worker)
 	}
+	worker.IP = workerIP
+	_ = workerSvc.UpdateWorker(worker)
 
 	// If project exists, remove old artifacts from worker
 	if existing, ok := projects[projectID]; ok {
 		_ = removeRuntimeArtifactsSSH(existing)
 	}
 
-	// Create deployment script to run on worker
-	imageName := fmt.Sprintf("minidevopshub-%s-%s", sanitizeName(projectName), projectID)
+	port := chooseProjectPort(worker.IP, projectID)
+	imageName := fmt.Sprintf("app-%s", projectID)
 	containerName := imageName
 	workspacePath := fmt.Sprintf("/tmp/%s", projectID)
+	cmd := generateDeploySSHCommand(repoURL, branch, projectID, port)
 
-	deployScript := generateDeploymentScript(repoURL, branch, projectID, workspacePath, imageName, containerName)
-
-	// Execute deployment script on worker via SSH
-	output, err := sshSvc.ExecuteDeploymentScript(worker.IP, "root", "", deployScript)
+	output, err := sshSvc.RunCommand(worker.IP, sshUser, sshKeyPath, cmd)
 	logs := ssh.ParseLogsFromOutput(output)
 	storeProjectLogs(projectID, logs)
+	log.Printf("deploy project=%s worker=%s ip=%s output=%s", projectID, workerID, worker.IP, output)
 
 	if err != nil {
 		return nil, fmt.Errorf("deployment on worker %s failed: %w", workerID, err)
 	}
 
-	// Extract port from output (last line should be the port)
-	hostPort := extractPortFromOutput(output)
-	if hostPort == 0 {
-		return nil, fmt.Errorf("failed to determine container port from deployment output")
+	hostPort := port
+	albHost := strings.TrimSpace(os.Getenv("ALB_HOST"))
+	if albHost == "" {
+		albHost = requestHost
 	}
 
 	project := &App{
@@ -211,7 +227,7 @@ func createOrUpdateProject(repoURL, branch, workerID, projectID string, requestH
 		WorkerIP:      worker.IP,
 		Status:        "running",
 		Port:          hostPort,
-		LiveURL:       fmt.Sprintf("http://%s/%s/", requestHost, projectID),
+		LiveURL:       fmt.Sprintf("http://%s/%s/", albHost, projectID),
 		WorkspaceDir:  workspacePath,
 		ImageName:     imageName,
 		ContainerName: containerName,
@@ -238,76 +254,48 @@ func createOrUpdateProject(repoURL, branch, workerID, projectID string, requestH
 		Status:    "live",
 		CreatedAt: time.Now().Format(time.RFC3339),
 	})
-	updateNginxConfig()
+	if err := writeProjectNginxConfig(project); err != nil {
+		return nil, err
+	}
+	if err := reloadNginx(); err != nil {
+		return nil, err
+	}
 	saveDashboardState()
 	return project, nil
 }
 
-func generateDeploymentScript(repoURL, branch, projectID, workspacePath, imageName, containerName string) string {
-	// Script to be executed on the worker node
-	script := fmt.Sprintf(`#!/bin/bash
-set -e
-echo "[INFO] Starting deployment for project %s"
-echo "[INFO] Repository: %s"
-echo "[INFO] Branch: %s"
-
-# Cleanup old deployment if exists
-echo "[INFO] Cleaning up old deployment..."
-rm -rf %s || true
-mkdir -p %s
-cd %s
-
-# Clone repository
-echo "[INFO] Cloning repository..."
-git clone --branch %s %s .
-
-# Detect container port from Dockerfile
-echo "[INFO] Building Docker image..."
-CONTAINER_PORT=$(grep -i "^EXPOSE" Dockerfile | awk '{print $2}' | head -1 || echo "3000")
-echo "[INFO] Container port: $CONTAINER_PORT"
-
-# Build Docker image
-docker build -t %s .
-
-# Find available port on host
-echo "[INFO] Finding available host port..."
-HOST_PORT=8000
-for port in {8000..8100}; do
-  if ! netstat -tuln 2>/dev/null | grep -q ":$port "; then
-    HOST_PORT=$port
-    break
-  fi
-done
-echo "[INFO] Using host port: $HOST_PORT"
-
-# Stop and remove old container if exists
-docker ps -a | grep %s && docker stop %s && docker rm %s || true
-
-# Run Docker container
-echo "[INFO] Running Docker container..."
-docker run -d -p $HOST_PORT:$CONTAINER_PORT %s
-
-echo "[INFO] Deployment successful"
-echo "[PORT] $HOST_PORT"
-`, projectID, repoURL, branch, workspacePath, workspacePath, workspacePath, branch, repoURL, imageName, containerName, containerName, containerName, imageName)
-
-	return script
+func generateDeploySSHCommand(repoURL, branch, projectID string, port int) string {
+	if strings.TrimSpace(branch) == "" {
+		return fmt.Sprintf(
+			"rm -rf /tmp/%[1]s && git clone %[2]s /tmp/%[1]s && cd /tmp/%[1]s && docker build -t app-%[1]s . && docker run -d --name app-%[1]s -p %[3]d:8080 app-%[1]s",
+			projectID,
+			repoURL,
+			port,
+		)
+	}
+	return fmt.Sprintf(
+		"rm -rf /tmp/%[1]s && git clone --branch %[2]s %[3]s /tmp/%[1]s && cd /tmp/%[1]s && docker build -t app-%[1]s . && docker run -d --name app-%[1]s -p %[4]d:8080 app-%[1]s",
+		projectID,
+		branch,
+		repoURL,
+		port,
+	)
 }
 
-func extractPortFromOutput(output string) int {
-	lines := strings.Split(output, "\n")
-	for i := len(lines) - 1; i >= 0; i-- {
-		line := strings.TrimSpace(lines[i])
-		if strings.HasPrefix(line, "[PORT]") {
-			parts := strings.Fields(line)
-			if len(parts) >= 2 {
-				if port, err := strconv.Atoi(parts[1]); err == nil {
-					return port
-				}
-			}
+func chooseProjectPort(workerIP, projectID string) int {
+	used := map[int]bool{}
+	for _, p := range projects {
+		if p != nil && p.WorkerIP == workerIP {
+			used[p.Port] = true
 		}
 	}
-	return 0
+	randomBytes := make([]byte, 2)
+	_, _ = rand.Read(randomBytes)
+	candidate := defaultPortBase + (int(randomBytes[0]) * int(randomBytes[1]) % 2000)
+	for used[candidate] || candidate == 0 {
+		candidate++
+	}
+	return candidate
 }
 
 func removeRuntimeArtifactsSSH(project *App) error {
@@ -320,17 +308,13 @@ func removeRuntimeArtifactsSSH(project *App) error {
 		return err
 	}
 
-	// Create cleanup script
-	cleanupScript := fmt.Sprintf(`#!/bin/bash
-set -e
-echo "[INFO] Cleaning up project %s on worker..."
-docker ps -a | grep %s && docker stop %s && docker rm %s || true
-docker rmi %s || true
-rm -rf %s || true
-echo "[INFO] Cleanup complete"
-`, project.ProjectID, project.ContainerName, project.ContainerName, project.ContainerName, project.ImageName, project.WorkspaceDir)
-
-	_, err = sshSvc.ExecuteDeploymentScript(worker.IP, "root", "", cleanupScript)
+	cleanupCmd := fmt.Sprintf(
+		"docker stop app-%[1]s && docker rm app-%[1]s && docker rmi app-%[1]s && rm -rf /tmp/%[1]s",
+		project.ProjectID,
+	)
+	output, err := sshSvc.RunCommand(worker.IP, sshUser, sshKeyPath, cleanupCmd)
+	storeProjectLogs(project.ProjectID, ssh.ParseLogsFromOutput(output))
+	log.Printf("clean project=%s worker=%s ip=%s output=%s", project.ProjectID, project.WorkerID, worker.IP, output)
 	return err
 }
 
@@ -338,16 +322,8 @@ func removeRuntimeArtifacts(project *App, removeWorkspace bool) error {
 	if project == nil {
 		return nil
 	}
-	// Try SSH cleanup first (worker-based cleanup)
-	_ = removeRuntimeArtifactsSSH(project)
-
-	// Also try local cleanup for backward compatibility
-	if project.ContainerName != "" {
-		_ = runShellCommand("docker", "stop", project.ContainerName)
-		_ = runShellCommand("docker", "rm", "-f", project.ContainerName)
-	}
-	if project.ImageName != "" {
-		_ = runShellCommand("docker", "rmi", "-f", project.ImageName)
+	if err := removeRuntimeArtifactsSSH(project); err != nil {
+		return err
 	}
 	if removeWorkspace && project.WorkspaceDir != "" {
 		_ = os.RemoveAll(project.WorkspaceDir)
@@ -382,67 +358,49 @@ func cleanProject(projectID string) error {
 	if !ok {
 		return service.ErrNotFound
 	}
-	_ = removeRuntimeArtifacts(project, true)
+	if err := removeRuntimeArtifacts(project, true); err != nil {
+		return err
+	}
 	delete(projects, projectID)
 	delete(projectLogs, projectID)
 	_ = logSvc.ClearLogs(projectID)
 	_ = deploySvc.DeleteLastConfig(projectID)
-	updateNginxConfig()
+	_ = removeProjectNginxConfig(projectID)
+	_ = reloadNginx()
 	saveDashboardState()
 	return nil
 }
 
-func updateNginxConfig() {
-	lines := []string{
-		"# Minimal NGINX config for MiniDevOpsHub",
-		"worker_processes 1;",
-		"events { worker_connections 1024; }",
-		"http {",
-		"    include       mime.types;",
-		"    default_type  application/octet-stream;",
-		"    sendfile        on;",
-		"    keepalive_timeout  65;",
-		"",
-		"    server {",
-		"        listen       80;",
-		"        server_name  localhost;",
-		"",
-		"        location /api/ {",
-		"            proxy_pass http://localhost:8080;",
-		"            proxy_set_header Host $host;",
-		"            proxy_set_header X-Real-IP $remote_addr;",
-		"        }",
-		"",
-		"        location / {",
-		"            root   frontend;",
-		"            index  index.html index.htm;",
-		"        }",
+func writeProjectNginxConfig(project *App) error {
+	if project == nil {
+		return nil
 	}
-
-	projectIDs := make([]string, 0, len(projects))
-	for projectID := range projects {
-		projectIDs = append(projectIDs, projectID)
-	}
-	sort.Strings(projectIDs)
-	for _, projectID := range projectIDs {
-		project := projects[projectID]
-		lines = append(lines,
-			"",
-			fmt.Sprintf("        location /%s/ {", projectID),
-			fmt.Sprintf("            proxy_pass http://%s:%d/;", project.WorkerIP, project.Port),
-			"            proxy_set_header Host $host;",
-			"            proxy_set_header X-Real-IP $remote_addr;",
-			"        }",
-		)
-	}
-
-	lines = append(lines,
-		"    }",
-		"}",
-		"",
+	conf := fmt.Sprintf(
+		"location /%s/ {\n    proxy_pass http://%s:%d/;\n    proxy_set_header Host $host;\n    proxy_set_header X-Real-IP $remote_addr;\n}\n",
+		project.ProjectID,
+		project.WorkerIP,
+		project.Port,
 	)
-	_ = os.WriteFile("nginx.conf", []byte(strings.Join(lines, "\n")), 0644)
-	_ = runShellCommand("nginx", "-s", "reload")
+	confPath := fmt.Sprintf("%s/%s.conf", nginxSitesDir, project.ProjectID)
+	return os.WriteFile(confPath, []byte(conf), 0644)
+}
+
+func removeProjectNginxConfig(projectID string) error {
+	confPath := fmt.Sprintf("%s/%s.conf", nginxSitesDir, projectID)
+	if err := os.Remove(confPath); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+func reloadNginx() error {
+	cmd := exec.Command("nginx", "-s", "reload")
+	output, err := cmd.CombinedOutput()
+	if len(output) > 0 {
+		storeProjectLogs("system", strings.Split(strings.TrimSpace(string(output)), "\n"))
+		log.Printf("nginx reload output=%s", strings.TrimSpace(string(output)))
+	}
+	return err
 }
 
 func runShellCommand(name string, args ...string) error {

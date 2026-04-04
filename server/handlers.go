@@ -77,7 +77,12 @@ func deployHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, http.StatusOK, DeployResponse{ProjectID: project.ProjectID, LiveURL: project.LiveURL})
+	writeJSON(w, http.StatusOK, DeployResponse{
+		ProjectID: project.ProjectID,
+		Worker:    project.WorkerID,
+		Port:      fmt.Sprintf("%d", project.Port),
+		LiveURL:   project.LiveURL,
+	})
 }
 
 func cleanupHandler(w http.ResponseWriter, r *http.Request) {
@@ -160,7 +165,12 @@ func rollbackHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
-	writeJSON(w, http.StatusOK, DeployResponse{ProjectID: rolledBackProject.ProjectID, LiveURL: rolledBackProject.LiveURL})
+	writeJSON(w, http.StatusOK, DeployResponse{
+		ProjectID: rolledBackProject.ProjectID,
+		Worker:    rolledBackProject.WorkerID,
+		Port:      fmt.Sprintf("%d", rolledBackProject.Port),
+		LiveURL:   rolledBackProject.LiveURL,
+	})
 }
 
 func rollbackProjectHandler(w http.ResponseWriter, r *http.Request) {
@@ -235,7 +245,7 @@ func workersHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		id := fmt.Sprintf("worker-%d", workerCount()+1)
-		workerObj := &worker.Worker{ID: id, Name: req.Name, IP: req.IP, Status: "active"}
+		workerObj := &worker.Worker{ID: id, Name: req.Name, IP: req.IP, Status: "active", ActiveJobs: 0}
 		if err := workerSvc.CreateWorker(workerObj); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return

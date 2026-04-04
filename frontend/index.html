@@ -461,7 +461,7 @@
                 <label for="worker-select">Worker</label>
                 <select id="worker-select"></select>
               </div>
-              <button class="btn" type="submit">Deploy</button>
+              <button class="btn" id="deployBtn" type="submit">Deploy</button>
             </form>
             <div class="deploy-note">Deploy uses the selected worker, streams logs every 2 seconds, and publishes a live URL once the container is running.</div>
           </div>
@@ -545,6 +545,16 @@
       logTimer: null,
       logText: ""
     };
+
+    function getByAnyId(ids) {
+      for (const id of ids) {
+        const element = document.getElementById(id);
+        if (element) {
+          return element;
+        }
+      }
+      return null;
+    }
 
     async function requestJSON(url, options = {}) {
       const response = await fetch(url, {
@@ -727,26 +737,46 @@
       }
     }
 
+    async function addProjectRow(projectId, worker, liveUrl) {
+      await loadProjects();
+      if (liveUrl) {
+        document.getElementById('live-url').textContent = liveUrl;
+      }
+      if (projectId && worker) {
+        console.log(`project=${projectId} worker=${worker}`);
+      }
+    }
+
     document.getElementById('deploy-form').addEventListener('submit', async (event) => {
       event.preventDefault();
-      const repo_url = document.getElementById('repo-url').value.trim();
+      const repoInput = getByAnyId(['repoInput', 'repo-url']);
+      const workerSelect = getByAnyId(['workerSelect', 'worker-select']);
+      const repo_url = (repoInput && repoInput.value ? repoInput.value : '').trim();
       const branch = document.getElementById('branch').value.trim() || 'main';
-      const worker_id = document.getElementById('worker-select').value;
+      const worker_id = workerSelect ? workerSelect.value : '';
       const response = await requestJSON('/deploy', {
         method: 'POST',
         body: JSON.stringify({ repo_url, branch, worker_id }),
       });
-      document.getElementById('live-url').textContent = response.live_url || '--';
+      await addProjectRow(response.project_id, response.worker, response.live_url || '--');
       if (response.live_url) {
         window.open(response.live_url, '_blank', 'noopener');
       }
-      await loadProjects();
+      await loadWorkers();
       const projects = await requestJSON('/projects');
       const project = projects.find((item) => item.project_id === response.project_id);
       if (project) {
         startLogPolling(project);
       }
     });
+
+    const deployBtn = getByAnyId(['deployBtn']);
+    if (deployBtn) {
+      deployBtn.addEventListener('click', async (event) => {
+        event.preventDefault();
+        document.getElementById('deploy-form').requestSubmit();
+      });
+    }
 
     document.getElementById('clear-logs-btn').addEventListener('click', () => {
       state.selectedProjectId = null;
