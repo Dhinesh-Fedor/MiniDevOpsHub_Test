@@ -3,414 +3,768 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>MiniDevOpsHub Dashboard</title>
+  <title>MiniDevOpsHub v3</title>
   <style>
+    :root {
+      --bg: #0b1020;
+      --panel: rgba(18, 25, 49, 0.92);
+      --panel-2: rgba(24, 32, 58, 0.95);
+      --line: rgba(144, 164, 230, 0.16);
+      --text: #e6ebff;
+      --muted: #9aa5cf;
+      --accent: #6ea8ff;
+      --accent-2: #7ce0a6;
+      --warn: #f0d071;
+      --danger: #ef7c8a;
+      --shadow: 0 18px 50px rgba(0, 0, 0, 0.45);
+      --radius: 18px;
+    }
+
+    * { box-sizing: border-box; }
+
     body {
-      font-family: 'Segoe UI', Arial, sans-serif;
       margin: 0;
-      background: linear-gradient(120deg, #f6f8fa 0%, #e9ecef 100%);
-      color: #22223b;
+      min-height: 100vh;
+      font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(circle at top left, rgba(110, 168, 255, 0.18), transparent 28%),
+        radial-gradient(circle at 85% 15%, rgba(124, 224, 166, 0.14), transparent 24%),
+        linear-gradient(180deg, #090d1a 0%, #0b1020 55%, #080b14 100%);
+      overflow-x: hidden;
     }
-    .container {
-      max-width: 1100px;
-      margin: 0 auto;
-      padding: 2.5rem 1rem;
+
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      background-image: linear-gradient(rgba(255,255,255,0.025) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.025) 1px, transparent 1px);
+      background-size: 38px 38px;
+      mask-image: linear-gradient(180deg, rgba(0,0,0,0.7), transparent 85%);
+      opacity: 0.4;
     }
-    h1 {
-      color: #22223b;
-      font-size: 2.2rem;
-      letter-spacing: 1px;
-      margin-bottom: 2rem;
-      text-align: center;
+
+    .shell {
+      width: min(1400px, calc(100% - 32px));
+      margin: 20px auto 28px;
+      display: grid;
+      gap: 18px;
     }
-    section {
-      background: #fff;
+
+    .topbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+      padding: 18px 22px;
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      background: linear-gradient(180deg, rgba(20, 27, 52, 0.96), rgba(13, 18, 35, 0.92));
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(18px);
+      animation: rise 420ms ease-out;
+    }
+
+    .brand {
+      display: flex;
+      align-items: baseline;
+      gap: 12px;
+      font-size: 1.8rem;
+      letter-spacing: 0.02em;
+      font-weight: 700;
+    }
+
+    .brand small {
+      color: var(--muted);
+      font-size: 0.95rem;
+      font-weight: 500;
+    }
+
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 14px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,0.03);
+      color: var(--muted);
+      font-size: 0.94rem;
+    }
+
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--warn);
+      box-shadow: 0 0 12px currentColor;
+    }
+
+    .dot.connected { background: var(--accent-2); }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 1.75fr 1fr;
+      gap: 18px;
+    }
+
+    .stack {
+      display: grid;
+      gap: 18px;
+    }
+
+    .card {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: linear-gradient(180deg, var(--panel), rgba(10, 14, 28, 0.88));
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(14px);
+      overflow: hidden;
+      animation: rise 520ms ease-out;
+    }
+
+    .card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 18px 20px 14px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .card-header h2 {
+      margin: 0;
+      font-size: 1.08rem;
+      letter-spacing: 0.02em;
+    }
+
+    .card-body {
+      padding: 18px 20px 20px;
+    }
+
+    .deploy-form {
+      display: grid;
+      grid-template-columns: 1.7fr 0.9fr 0.9fr auto;
+      gap: 12px;
+      align-items: end;
+    }
+
+    .field {
+      display: grid;
+      gap: 8px;
+    }
+
+    .field label {
+      color: var(--muted);
+      font-size: 0.86rem;
+      letter-spacing: 0.02em;
+    }
+
+    input, select, button {
+      font: inherit;
+    }
+
+    input, select {
+      width: 100%;
+      color: var(--text);
+      background: rgba(6, 10, 22, 0.78);
+      border: 1px solid rgba(145, 168, 255, 0.18);
       border-radius: 12px;
-      margin-bottom: 2.2rem;
-      box-shadow: 0 4px 16px #0001;
-      padding: 2rem 1.5rem;
-      transition: box-shadow 0.2s;
+      padding: 13px 14px;
+      outline: none;
+      transition: border-color 140ms ease, transform 140ms ease, box-shadow 140ms ease;
     }
-    section:hover {
-      box-shadow: 0 8px 32px #0002;
+
+    input:focus, select:focus {
+      border-color: rgba(110, 168, 255, 0.7);
+      box-shadow: 0 0 0 3px rgba(110, 168, 255, 0.15);
     }
-    .section-title {
-      font-size: 1.25rem;
-      color: #4a4e69;
-      margin-bottom: 1.2rem;
+
+    .btn {
+      border: 1px solid transparent;
+      border-radius: 12px;
+      padding: 13px 16px;
+      background: linear-gradient(180deg, #3050d8, #243fa4);
+      color: white;
+      cursor: pointer;
+      font-weight: 700;
+      transition: transform 140ms ease, filter 140ms ease;
+    }
+
+    .btn:hover { transform: translateY(-1px); filter: brightness(1.06); }
+
+    .btn.secondary {
+      background: rgba(255,255,255,0.04);
+      border-color: rgba(145, 168, 255, 0.16);
+      color: var(--text);
       font-weight: 600;
-      letter-spacing: 0.5px;
     }
-    .logs {
-      background: #232946;
-      color: #eebbc3;
-      font-family: 'Fira Mono', monospace;
-      padding: 1rem;
-      border-radius: 8px;
-      height: 220px;
-      overflow-y: auto;
-      font-size: 1rem;
-      margin-bottom: 0.5rem;
+
+    .deploy-note {
+      margin-top: 12px;
+      color: var(--muted);
+      font-size: 0.92rem;
     }
+
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .metric {
+      padding: 14px;
+      border-radius: 14px;
+      background: rgba(255,255,255,0.03);
+      border: 1px solid rgba(145, 168, 255, 0.12);
+    }
+
+    .metric .label { color: var(--muted); font-size: 0.84rem; }
+    .metric .value { margin-top: 10px; font-size: 1.08rem; font-weight: 700; }
+
+    .workers-list {
+      display: grid;
+      gap: 10px;
+    }
+
+    .worker-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 12px 14px;
+      border-radius: 14px;
+      background: rgba(255,255,255,0.03);
+      border: 1px solid rgba(145, 168, 255, 0.12);
+    }
+
+    .worker-left {
+      display: grid;
+      gap: 4px;
+    }
+
+    .worker-name { font-weight: 700; }
+    .worker-meta, .muted { color: var(--muted); font-size: 0.9rem; }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: rgba(255,255,255,0.03);
+      border: 1px solid rgba(145, 168, 255, 0.12);
+      color: var(--text);
+      font-size: 0.88rem;
+    }
+
+    .badge .dot { width: 8px; height: 8px; }
+
+    .table-wrap {
+      overflow: auto;
+      border-radius: 18px;
+      border: 1px solid rgba(145, 168, 255, 0.12);
+    }
+
     table {
       width: 100%;
-      border-collapse: separate;
-      border-spacing: 0;
-      background: #f8f9fa;
-      border-radius: 8px;
-      overflow: hidden;
-      box-shadow: 0 1px 4px #0001;
+      border-collapse: collapse;
+      min-width: 980px;
+      background: rgba(7, 11, 22, 0.66);
     }
-    th, td {
-      padding: 0.7rem 0.5rem;
-      border-bottom: 1px solid #e9ecef;
+
+    thead th {
       text-align: left;
+      padding: 14px 16px;
+      font-size: 0.84rem;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: var(--muted);
+      background: rgba(255,255,255,0.02);
+      border-bottom: 1px solid rgba(145, 168, 255, 0.12);
     }
-    th {
-      background: #e9ecef;
-      font-weight: 600;
-      color: #232946;
+
+    tbody td {
+      padding: 14px 16px;
+      border-bottom: 1px solid rgba(145, 168, 255, 0.1);
+      vertical-align: middle;
     }
-    tr:last-child td {
-      border-bottom: none;
+
+    tbody tr:hover { background: rgba(255,255,255,0.02); }
+
+    .status {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      border-radius: 999px;
+      font-weight: 700;
+      font-size: 0.9rem;
     }
-    button {
-      background: #4a4e69;
-      color: #fff;
-      border: none;
-      border-radius: 5px;
-      padding: 0.4rem 0.9rem;
-      margin: 0.1rem 0.2rem;
-      font-size: 1rem;
+
+    .status.running { color: var(--accent-2); background: rgba(124, 224, 166, 0.08); }
+    .status.deploying { color: var(--warn); background: rgba(240, 208, 113, 0.09); }
+    .status.cleaned { color: var(--muted); background: rgba(255,255,255,0.05); }
+
+    .status .dot { width: 8px; height: 8px; }
+
+    .live-link {
+      color: var(--accent);
+      text-decoration: none;
+      word-break: break-all;
+    }
+
+    .actions {
+      position: relative;
+      display: inline-block;
+    }
+
+    .actions summary {
+      list-style: none;
       cursor: pointer;
-      transition: background 0.15s;
+      padding: 9px 12px;
+      border-radius: 10px;
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(145, 168, 255, 0.14);
     }
-    button:hover {
-      background: #9a8c98;
+
+    .actions summary::-webkit-details-marker { display: none; }
+
+    .menu {
+      position: absolute;
+      right: 0;
+      top: calc(100% + 8px);
+      min-width: 160px;
+      padding: 8px;
+      border-radius: 14px;
+      background: #10172d;
+      border: 1px solid rgba(145, 168, 255, 0.16);
+      box-shadow: var(--shadow);
+      z-index: 20;
     }
-    input, select {
-      padding: 0.4rem 0.7rem;
-      border: 1px solid #bfc0c0;
-      border-radius: 5px;
-      margin-right: 0.5rem;
-      font-size: 1rem;
-      margin-bottom: 0.5rem;
+
+    .menu button {
+      width: 100%;
+      text-align: left;
+      background: transparent;
+      color: var(--text);
+      border: none;
+      padding: 10px 10px;
+      border-radius: 10px;
+      cursor: pointer;
     }
-    #worker-list, #commit-list {
-      padding-left: 1.2rem;
-      font-size: 1rem;
+
+    .menu button:hover { background: rgba(255,255,255,0.05); }
+
+    .logs-panel {
+      display: grid;
+      grid-template-rows: auto auto 1fr auto;
+      gap: 12px;
+      min-height: 640px;
     }
-    #worker-list li, #commit-list li {
-      margin-bottom: 0.3rem;
+
+    .logs-meta {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
     }
-    #repo-info {
-      background: #f2e9e4;
-      border-radius: 6px;
-      padding: 0.7rem 1rem;
-      margin-bottom: 0.7rem;
-      font-size: 1rem;
-      color: #232946;
-      white-space: pre-line;
+
+    .logs {
+      min-height: 470px;
+      max-height: 470px;
+      overflow: auto;
+      padding: 14px;
+      border-radius: 16px;
+      background: #050814;
+      border: 1px solid rgba(145, 168, 255, 0.12);
+      font-family: Consolas, "Courier New", monospace;
+      font-size: 0.92rem;
+      line-height: 1.6;
+      color: #dbe4ff;
+      white-space: pre-wrap;
+    }
+
+    .repo-card {
+      display: grid;
+      gap: 12px;
+    }
+
+    .repo-card code {
+      display: block;
+      word-break: break-all;
+      padding: 12px;
+      border-radius: 14px;
+      background: rgba(255,255,255,0.03);
+      border: 1px solid rgba(145, 168, 255, 0.12);
+      color: #cbd8ff;
+    }
+
+    .footer-note {
+      color: var(--muted);
+      font-size: 0.88rem;
+    }
+
+    .live-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: rgba(124, 224, 166, 0.08);
+      border: 1px solid rgba(124, 224, 166, 0.2);
+      color: #c9f5db;
+    }
+
+    @keyframes rise {
+      from { transform: translateY(10px); opacity: 0; }
+      to { transform: translateY(0); opacity: 1; }
+    }
+
+    @media (max-width: 1100px) {
+      .layout { grid-template-columns: 1fr; }
+      .deploy-form { grid-template-columns: 1fr; }
+      .logs-panel { min-height: auto; }
+    }
+
+    @media (max-width: 720px) {
+      .shell { width: min(100% - 20px, 1400px); }
+      .topbar { flex-direction: column; align-items: flex-start; }
+      .metrics { grid-template-columns: 1fr; }
     }
   </style>
 </head>
 <body>
-  <div class="container">
-    <h1>MiniDevOpsHub Dashboard</h1>
-    <section>
-      <div class="section-title">Register Worker</div>
-      <form id="worker-form">
-        <input type="text" id="worker-name" placeholder="Worker Name" required />
-        <input type="text" id="worker-ip" placeholder="Worker IP" required />
-        <button type="submit">Register</button>
-      </form>
-    </section>
-    <section>
-      <div class="section-title">Deploy New Project</div>
-      <form id="deploy-form">
-        <input type="text" id="repo-url" placeholder="GitHub Repo URL" required />
-        <input type="text" id="branch" placeholder="Branch (default: main)" />
-        <select id="worker-select"></select>
-        <button type="submit">Deploy</button>
-      </form>
-    </section>
-    <section>
-      <div class="section-title">Projects</div>
-      <table id="projects-table">
-        <thead>
-          <tr><th>ID</th><th>Repo</th><th>Branch</th><th>Port</th><th>Status</th><th>Actions</th></tr>
-        </thead>
-        <tbody></tbody>
-      </table>
-    </section>
-      <section>
-        <div class="section-title">Repo Info & Commits</div>
-        <div id="repo-info"></div>
-        <button id="show-commits-btn">Show Commit History</button>
-        <ul id="commit-list"></ul>
-      </section>
-    <section>
-      <div class="section-title">Logs</div>
-      <div class="logs" id="logs"></div>
-      <button id="live-logs-btn">Show Live Logs</button>
-    </section>
-    <section>
-      <div class="section-title">Workers</div>
-      <ul id="worker-list"></ul>
-    </section>
-    <section>
-      <div class="section-title">Help</div>
-      <ul>
-        <li>Register workers (server IPs) before deploying.</li>
-        <li>Deploy a project by linking a GitHub repo and selecting a worker.</li>
-        <li>Use Clean to remove a deployment, Rollback to revert, and Logs for build/runtime output.</li>
-        <li>Click Show Commit History for repo commits.</li>
-      </ul>
-    </section>
+  <div class="shell">
+    <header class="topbar">
+      <div class="brand">MiniDevOpsHub <small>v3 control plane</small></div>
+      <div class="status-pill"><span id="connection-dot" class="dot"></span><span id="connection-text">Checking backend...</span></div>
+    </header>
+
+    <div class="layout">
+      <div class="stack">
+        <section class="card">
+          <div class="card-header">
+            <h2>Deploy New Service</h2>
+            <span class="live-badge" id="selected-project-chip" style="display:none;">Selected project: <strong id="selected-project-label"></strong></span>
+          </div>
+          <div class="card-body">
+            <form id="deploy-form" class="deploy-form">
+              <div class="field">
+                <label for="repo-url">Repository URL</label>
+                <input id="repo-url" type="url" placeholder="https://github.com/user/repo" required />
+              </div>
+              <div class="field">
+                <label for="branch">Branch</label>
+                <input id="branch" type="text" placeholder="main" value="main" />
+              </div>
+              <div class="field">
+                <label for="worker-select">Worker</label>
+                <select id="worker-select"></select>
+              </div>
+              <button class="btn" type="submit">Deploy</button>
+            </form>
+            <div class="deploy-note">Deploy uses the selected worker, streams logs every 2 seconds, and publishes a live URL once the container is running.</div>
+          </div>
+        </section>
+
+        <section class="card">
+          <div class="card-header">
+            <h2>Deployed Projects</h2>
+            <span class="muted" id="project-count">0 projects</span>
+          </div>
+          <div class="card-body">
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>ID</th>
+                    <th>Name</th>
+                    <th>Worker</th>
+                    <th>Status</th>
+                    <th>Live URL</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="projects-body"></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <div class="stack">
+        <section class="card">
+          <div class="card-header">
+            <h2>Worker Pool</h2>
+            <span class="live-badge"><span class="dot connected"></span><span id="worker-summary">0 workers</span></span>
+          </div>
+          <div class="card-body">
+            <div class="metrics">
+              <div class="metric">
+                <div class="label">Workers</div>
+                <div class="value" id="workers-total">0</div>
+              </div>
+              <div class="metric">
+                <div class="label">Active</div>
+                <div class="value" id="workers-active">0</div>
+              </div>
+            </div>
+            <div style="height: 14px"></div>
+            <div id="workers-list" class="workers-list"></div>
+          </div>
+        </section>
+
+        <section class="card logs-panel">
+          <div class="card-header">
+            <h2>Live Logs</h2>
+            <button class="btn secondary" id="clear-logs-btn" type="button">Clear</button>
+          </div>
+          <div class="card-body logs-meta">
+            <div>
+              <div class="muted">Project</div>
+              <div id="logs-project-label" style="font-weight:700;">None selected</div>
+            </div>
+            <div class="badge"><span class="dot connected"></span><span id="logs-state">Polling off</span></div>
+          </div>
+          <div class="card-body">
+            <div id="logs" class="logs">Deploy a project or click Logs on a project row to start streaming output.</div>
+          </div>
+          <div class="card-body repo-card">
+            <div class="muted">Live URL</div>
+            <code id="live-url">--</code>
+            <div class="footer-note">Open the deployed app in a new tab from the table, or from the post-deploy prompt.</div>
+          </div>
+        </section>
+      </div>
+    </div>
   </div>
+
   <script>
-    async function fetchJSON(url, opts) {
-      const res = await fetch(url, opts);
-      if (!res.ok) throw new Error(await res.text());
-      return res.json();
-    }
-
-    // Load workers into both the select (for deploy) and the worker list (for dashboard)
-    async function loadWorkers() {
-      const workers = await fetchJSON('/workers');
-      // Update worker select for deploy
-      const select = document.getElementById('worker-select');
-      if (select) {
-        select.innerHTML = '';
-        for (const w of workers) {
-          const opt = document.createElement('option');
-          opt.value = w.worker_id || w.name || w.ip;
-          opt.textContent = `${w.name} (${w.ip})`;
-          select.appendChild(opt);
-        }
-      }
-      // Update worker list for dashboard
-      const ul = document.getElementById('worker-list');
-      if (ul) {
-        ul.innerHTML = '';
-        for (const w of workers) {
-          const li = document.createElement('li');
-          li.textContent = `${w.name} (${w.ip})`;
-          ul.appendChild(li);
-        }
-      }
-    }
-
-    document.getElementById('worker-form').onsubmit = async e => {
-      e.preventDefault();
-      const name = document.getElementById('worker-name').value;
-      const ip = document.getElementById('worker-ip').value;
-      await fetchJSON('/workers', {method:'POST',body:JSON.stringify({name,ip}),headers:{'Content-Type':'application/json'}});
-      loadWorkers();
+    const state = {
+      selectedProjectId: null,
+      logTimer: null,
+      logText: ""
     };
+
+    async function requestJSON(url, options = {}) {
+      const response = await fetch(url, {
+        headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+        ...options,
+      });
+      if (!response.ok) {
+        const message = await response.text();
+        throw new Error(message || response.statusText);
+      }
+      const contentType = response.headers.get('content-type') || '';
+      if (contentType.includes('application/json')) {
+        return response.json();
+      }
+      return response.text();
+    }
+
+    function setSelectedProject(project) {
+      state.selectedProjectId = project ? project.project_id : null;
+      const chip = document.getElementById('selected-project-chip');
+      const label = document.getElementById('selected-project-label');
+      const logsProjectLabel = document.getElementById('logs-project-label');
+      const liveUrl = document.getElementById('live-url');
+      if (!project) {
+        chip.style.display = 'none';
+        label.textContent = '';
+        logsProjectLabel.textContent = 'None selected';
+        liveUrl.textContent = '--';
+        return;
+      }
+      chip.style.display = 'inline-flex';
+      label.textContent = `${project.name} (${project.project_id})`;
+      logsProjectLabel.textContent = project.project_id;
+      liveUrl.textContent = project.live_url || '--';
+    }
+
+    async function checkConnection() {
+      const dot = document.getElementById('connection-dot');
+      const text = document.getElementById('connection-text');
+      try {
+        await requestJSON('/healthz');
+        dot.classList.add('connected');
+        text.textContent = 'Connected';
+      } catch (error) {
+        dot.classList.remove('connected');
+        text.textContent = 'Backend unreachable';
+      }
+    }
+
+    async function loadWorkers() {
+      const workers = await requestJSON('/workers');
+      const workerSelect = document.getElementById('worker-select');
+      const workersList = document.getElementById('workers-list');
+      workerSelect.innerHTML = '';
+      workersList.innerHTML = '';
+
+      let activeCount = 0;
+      workers.forEach((workerNode) => {
+        const option = document.createElement('option');
+        option.value = workerNode.id;
+        option.textContent = `${workerNode.name} (${workerNode.ip})`;
+        workerSelect.appendChild(option);
+
+        const row = document.createElement('div');
+        row.className = 'worker-row';
+        row.innerHTML = `
+          <div class="worker-left">
+            <div class="worker-name">${workerNode.name}</div>
+            <div class="worker-meta">${workerNode.ip}</div>
+          </div>
+          <div class="badge"><span class="dot connected"></span><span>${workerNode.status || 'active'}</span></div>
+        `;
+        workersList.appendChild(row);
+
+        if ((workerNode.status || '').toLowerCase() === 'active') {
+          activeCount += 1;
+        }
+      });
+
+      document.getElementById('workers-total').textContent = String(workers.length);
+      document.getElementById('workers-active').textContent = String(activeCount);
+      document.getElementById('worker-summary').textContent = `${workers.length} workers`;
+    }
 
     async function loadProjects() {
-      const projects = await fetchJSON('/projects');
-      const tbody = document.querySelector('#projects-table tbody');
+      const projects = await requestJSON('/projects');
+      const tbody = document.getElementById('projects-body');
       tbody.innerHTML = '';
-      for (const p of projects) {
-        const tr = document.createElement('tr');
-        tr.innerHTML = `
-          <td>${p.project_id}</td>
-          <td>${p.repo_url}</td>
-          <td>${p.branch}</td>
-          <td>${p.port}</td>
-          <td>${p.status}</td>
-          <td>${p.worker_id || ''}</td>
+      document.getElementById('project-count').textContent = `${projects.length} project${projects.length === 1 ? '' : 's'}`;
+
+      projects.forEach((project) => {
+        const row = document.createElement('tr');
+        row.innerHTML = `
+          <td>${project.project_id}</td>
+          <td>${project.name || project.repo_url || project.project_id}</td>
+          <td>${project.worker_name || project.worker_id || '--'}</td>
+          <td><span class="status ${project.status || ''}"><span class="dot connected"></span>${project.status || 'unknown'}</span></td>
+          <td>${project.live_url ? `<a class="live-link" href="${project.live_url}" target="_blank" rel="noreferrer">${project.live_url}</a>` : '--'}</td>
           <td>
-            <button onclick="redeploy('${p.project_id}')">Redeploy</button>
-            <button onclick="showLogs('${p.project_id}')">Logs</button>
-            <button onclick="cleanup('${p.project_id}')">Clean</button>
-            <button onclick="rollback('${p.project_id}')">Rollback</button>
+            <details class="actions">
+              <summary>Actions</summary>
+              <div class="menu">
+                <button type="button" onclick="openProject('${project.project_id}')">Open</button>
+                <button type="button" onclick="selectProject('${project.project_id}')">Logs</button>
+                <button type="button" onclick="rollbackProject('${project.project_id}')">Rollback</button>
+                <button type="button" onclick="cleanProject('${project.project_id}')">Clean</button>
+              </div>
+            </details>
           </td>
         `;
-        tbody.appendChild(tr);
+        tbody.appendChild(row);
+      });
+    }
+
+    async function refreshLogs() {
+      if (!state.selectedProjectId) {
+        return;
+      }
+      try {
+        const lines = await requestJSON(`/logs/${state.selectedProjectId}`);
+        const logs = Array.isArray(lines) ? lines : lines.lines || [];
+        state.logText = logs.join('\n');
+        const box = document.getElementById('logs');
+        box.textContent = state.logText || 'No logs found.';
+        box.scrollTop = box.scrollHeight;
+        document.getElementById('logs-state').textContent = 'Polling on';
+      } catch (error) {
+        document.getElementById('logs').textContent = error.message;
+        document.getElementById('logs-state').textContent = 'Polling error';
       }
     }
 
-    async function redeploy(project_id) {
-      await fetchJSON('/deploy', {method:'POST',body:JSON.stringify({project_id})});
-      loadProjects();
+    function startLogPolling(project) {
+      clearInterval(state.logTimer);
+      setSelectedProject(project);
+      document.getElementById('logs-state').textContent = 'Polling on';
+      refreshLogs();
+      state.logTimer = setInterval(refreshLogs, 2000);
     }
-    async function cleanup(project_id) {
-      await fetchJSON('/cleanup', {method:'POST',body:JSON.stringify({project_id})});
-      loadProjects();
+
+    async function selectProject(projectId) {
+      const projects = await requestJSON('/projects');
+      const project = projects.find((item) => item.project_id === projectId);
+      if (!project) {
+        return;
+      }
+      startLogPolling(project);
     }
-    async function rollback(project_id) {
-      await fetchJSON('/rollback', {method:'POST',body:JSON.stringify({project_id})});
-      loadProjects();
-    }
-    async function showLogs(project_id) {
-      const logs = await fetchJSON(`/logs/${project_id}`);
-      document.getElementById('logs').innerText = logs.join('\n');
-      document.getElementById('live-logs-btn').onclick = () => showLiveLogs(project_id);
-      document.getElementById('show-commits-btn').onclick = () => showCommits(project_id);
-      showRepoInfo(project_id);
-    }
-    async function showRepoInfo(project_id) {
-      document.getElementById('repo-info').innerText = 'Loading repo info...';
-      try {
-        const info = await fetchJSON(`/repo/${project_id}`);
-        document.getElementById('repo-info').innerText = `Repo: ${info.repo_url}\nBranch: ${info.branch}\nLast Commit: ${info.last_commit}\nCommit Time: ${info.commit_time}`;
-      } catch (e) {
-        document.getElementById('repo-info').innerText = 'Repo info not found.';
+
+    function openProject(projectId) {
+      const link = document.querySelector(`a[href$="/${projectId}/"]`);
+      if (link) {
+        window.open(link.href, '_blank', 'noopener');
       }
     }
-    async function showCommits(project_id) {
-      const commitList = document.getElementById('commit-list');
-      commitList.innerHTML = '<li>Loading commit history...</li>';
-      try {
-        const commits = await fetchJSON(`/commits/${project_id}`);
-        commitList.innerHTML = '';
-        for (const c of commits) {
-          const li = document.createElement('li');
-          li.textContent = `${c.hash}: ${c.msg} (${c.time})`;
-          commitList.appendChild(li);
-        }
-      } catch (e) {
-        commitList.innerHTML = '<li>No commit history found.</li>';
+
+    async function cleanProject(projectId) {
+      await requestJSON(`/clean/${projectId}`, { method: 'POST', body: JSON.stringify({ project_id: projectId }) });
+      if (state.selectedProjectId === projectId) {
+        clearInterval(state.logTimer);
+        state.selectedProjectId = null;
+        setSelectedProject(null);
+        document.getElementById('logs').textContent = 'Project cleaned.';
+        document.getElementById('logs-state').textContent = 'Polling off';
+      }
+      await loadProjects();
+      await loadWorkers();
+    }
+
+    async function rollbackProject(projectId) {
+      const response = await requestJSON(`/rollback/${projectId}`, { method: 'POST', body: JSON.stringify({ project_id: projectId }) });
+      const projects = await requestJSON('/projects');
+      const project = projects.find((item) => item.project_id === response.project_id);
+      if (project) {
+        startLogPolling(project);
+      }
+      await loadProjects();
+      if (response.live_url) {
+        document.getElementById('live-url').textContent = response.live_url;
       }
     }
-    function showLiveLogs(project_id) {
-      const logsDiv = document.getElementById('logs');
-      logsDiv.innerText = '';
-      const evtSource = new EventSource(`/logs/stream?project_id=${project_id}`);
-      evtSource.onmessage = function(e) {
-        logsDiv.innerText += e.data + '\n';
-        logsDiv.scrollTop = logsDiv.scrollHeight;
-      };
-      evtSource.onerror = function() { evtSource.close(); };
-    }
-    document.getElementById('deploy-form').onsubmit = async e => {
-      e.preventDefault();
-      const repo_url = document.getElementById('repo-url').value;
-      const branch = document.getElementById('branch').value || 'main';
+
+    document.getElementById('deploy-form').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const repo_url = document.getElementById('repo-url').value.trim();
+      const branch = document.getElementById('branch').value.trim() || 'main';
       const worker_id = document.getElementById('worker-select').value;
-      await fetchJSON('/deploy', {method:'POST',body:JSON.stringify({repo_url,branch,worker_id})});
-      loadProjects();
-    };
+      const response = await requestJSON('/deploy', {
+        method: 'POST',
+        body: JSON.stringify({ repo_url, branch, worker_id }),
+      });
+      document.getElementById('live-url').textContent = response.live_url || '--';
+      if (response.live_url) {
+        window.open(response.live_url, '_blank', 'noopener');
+      }
+      await loadProjects();
+      const projects = await requestJSON('/projects');
+      const project = projects.find((item) => item.project_id === response.project_id);
+      if (project) {
+        startLogPolling(project);
+      }
+    });
+
+    document.getElementById('clear-logs-btn').addEventListener('click', () => {
+      state.selectedProjectId = null;
+      clearInterval(state.logTimer);
+      setSelectedProject(null);
+      document.getElementById('logs').textContent = 'Logs cleared locally. Select a project to start polling again.';
+      document.getElementById('logs-state').textContent = 'Polling off';
+    });
+
+    setInterval(checkConnection, 5000);
     setInterval(loadProjects, 5000);
     setInterval(loadWorkers, 10000);
-    loadProjects();
-    loadWorkers();
-  </script>
-  <script>
-    async function fetchJSON(url, opts) {
-      const res = await fetch(url, opts);
-      if (!res.ok) throw new Error(await res.text());
-      return res.json();
-    }
-    async function loadWorkers() {
-      const workers = await fetchJSON('/workers');
-      const select = document.getElementById('worker-select');
-      select.innerHTML = '';
-      for (const w of workers) {
-        const opt = document.createElement('option');
-        opt.value = w.worker_id;
-        opt.textContent = `${w.name} (${w.ip})`;
-        select.appendChild(opt);
-      }
-    }
-    document.getElementById('worker-form').onsubmit = async e => {
-      e.preventDefault();
-      const name = document.getElementById('worker-name').value;
-      const ip = document.getElementById('worker-ip').value;
-      await fetchJSON('/workers', {method:'POST',body:JSON.stringify({name,ip}),headers:{'Content-Type':'application/json'}});
-      loadWorkers();
-    };
-    async function loadProjects() {
-      const projects = await fetchJSON('/projects');
-      const tbody = document.querySelector('#projects-table tbody');
-      tbody.innerHTML = '';
-      for (const p of projects) {
-        const tr = document.createElement('tr');
-        tr.innerHTML = `
-          <td>${p.project_id}</td>
-          <td>${p.repo_url}</td>
-          <td>${p.branch}</td>
-          <td>${p.port}</td>
-          <td>${p.status}</td>
-          <td>${p.worker_id || ''}</td>
-          <td>
-            <button onclick="redeploy('${p.project_id}')">Redeploy</button>
-            <button onclick="showLogs('${p.project_id}')">Logs</button>
-            <button onclick="cleanup('${p.project_id}')">Clean</button>
-            <button onclick="rollback('${p.project_id}')">Rollback</button>
-          </td>
-        `;
-        tbody.appendChild(tr);
-      }
-    }
-    async function redeploy(project_id) {
-      await fetchJSON('/deploy', {method:'POST',body:JSON.stringify({project_id})});
-      loadProjects();
-    }
-    async function cleanup(project_id) {
-      await fetchJSON('/cleanup', {method:'POST',body:JSON.stringify({project_id})});
-      loadProjects();
-    }
-    async function rollback(project_id) {
-      await fetchJSON('/rollback', {method:'POST',body:JSON.stringify({project_id})});
-      loadProjects();
-    }
-    async function showLogs(project_id) {
-      const logs = await fetchJSON(`/logs/${project_id}`);
-      document.getElementById('logs').innerText = logs.join('\n');
-      document.getElementById('live-logs-btn').onclick = () => showLiveLogs(project_id);
-        document.getElementById('show-commits-btn').onclick = () => showCommits(project_id);
-        showRepoInfo(project_id);
-    }
-      async function showRepoInfo(project_id) {
-        document.getElementById('repo-info').innerText = 'Loading repo info...';
-        try {
-          const info = await fetchJSON(`/repo/${project_id}`);
-          document.getElementById('repo-info').innerText = `Repo: ${info.repo_url}\nBranch: ${info.branch}\nLast Commit: ${info.last_commit}\nCommit Time: ${info.commit_time}`;
-        } catch (e) {
-          document.getElementById('repo-info').innerText = 'Repo info not found.';
-        }
-      }
-      async function showCommits(project_id) {
-        const commitList = document.getElementById('commit-list');
-        commitList.innerHTML = '<li>Loading commit history...</li>';
-        try {
-          const commits = await fetchJSON(`/commits/${project_id}`);
-          commitList.innerHTML = '';
-          for (const c of commits) {
-            const li = document.createElement('li');
-            li.textContent = `${c.hash}: ${c.msg} (${c.time})`;
-            commitList.appendChild(li);
-          }
-        } catch (e) {
-          commitList.innerHTML = '<li>No commit history found.</li>';
-        }
-      }
-    function showLiveLogs(project_id) {
-      const logsDiv = document.getElementById('logs');
-      logsDiv.innerText = '';
-      const evtSource = new EventSource(`/logs/stream?project_id=${project_id}`);
-      evtSource.onmessage = function(e) {
-        logsDiv.innerText += e.data + '\n';
-        logsDiv.scrollTop = logsDiv.scrollHeight;
-      };
-      evtSource.onerror = function() { evtSource.close(); };
-    }
-    document.getElementById('deploy-form').onsubmit = async e => {
-      e.preventDefault();
-      const repo_url = document.getElementById('repo-url').value;
-      const branch = document.getElementById('branch').value || 'main';
-      const worker_id = document.getElementById('worker-select').value;
-      await fetchJSON('/deploy', {method:'POST',body:JSON.stringify({repo_url,branch,worker_id})});
-      loadProjects();
-    };
-    setInterval(loadProjects, 5000);
-    setInterval(loadWorkers, 10000);
-    loadProjects();
-    loadWorkers();
+
+    (async () => {
+      await checkConnection();
+      await loadWorkers();
+      await loadProjects();
+    })();
   </script>
 </body>
 </html>

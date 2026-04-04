@@ -1,11 +1,14 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os/exec"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/minidevopshub/minidevopshub/internal/worker"
 )
 
 func createAppHandler(w http.ResponseWriter, r *http.Request) {
@@ -13,142 +16,212 @@ func createAppHandler(w http.ResponseWriter, r *http.Request) {
 		Name string `json:"name"`
 		Repo string `json:"repo"`
 	}
-	json.NewDecoder(r.Body).Decode(&req)
-	if req.Name == "" || req.Repo == "" {
-		w.WriteHeader(400)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
-	apps[req.Name] = &App{
-		Name:        req.Name,
-		Repo:        req.Repo,
-		Status:      "Created",
-		Version:     0,
-		ActiveColor: "blue",
+	if req.Name == "" || req.Repo == "" {
+		http.Error(w, "name and repo are required", http.StatusBadRequest)
+		return
 	}
-	w.WriteHeader(200)
+	projectID := randomID()
+	projects[projectID] = &App{
+		ProjectID: projectID,
+		Name:      req.Name,
+		RepoURL:   req.Repo,
+		Status:    "created",
+	}
+	saveDashboardState()
+	writeJSON(w, http.StatusOK, projects[projectID])
 }
 
 func listAppsHandler(w http.ResponseWriter, r *http.Request) {
-	var out []*App
-	for _, a := range apps {
-		out = append(out, a)
-	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(out)
+	list := listProjects()
+	writeJSON(w, http.StatusOK, list)
 }
 
 func deployHandler(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		App    string `json:"app"`
-		Worker string `json:"worker"`
-	}
-	json.NewDecoder(r.Body).Decode(&req)
-	app, ok := apps[req.App]
-	if !ok {
-		w.WriteHeader(404)
+	var req DeployRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
-	workerIP, ok := workers[req.Worker]
-	if !ok {
-		w.WriteHeader(404)
+	if req.RepoURL == "" || req.WorkerID == "" {
+		http.Error(w, "repo_url and worker_id are required", http.StatusBadRequest)
 		return
 	}
-	color := "green"
-	if app.ActiveColor == "green" {
-		color = "blue"
+	project, err := createOrUpdateProject(req.RepoURL, req.Branch, req.WorkerID, req.ProjectID, publicHost(r))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
-	// Simulate SSH and Docker commands (replace with real SSH in production)
-	app.Worker = req.Worker
-	app.WorkerIP = workerIP
-	app.Version++
-	app.Status = "Live"
-	app.ActiveColor = color
-	logs[app.Name] = append(logs[app.Name], fmt.Sprintf("Deployed version %d to %s", app.Version, color))
-	w.WriteHeader(200)
+	writeJSON(w, http.StatusOK, DeployResponse{ProjectID: project.ProjectID, LiveURL: project.LiveURL})
 }
 
 func cleanupHandler(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		App string `json:"app"`
+	projectID := projectIDFromRequest(r)
+	if projectID == "" {
+		var req CleanRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err == nil {
+			projectID = req.ProjectID
+		}
 	}
-	json.NewDecoder(r.Body).Decode(&req)
-	app, ok := apps[req.App]
-	if !ok {
-		w.WriteHeader(404)
+	if projectID == "" {
+		http.Error(w, "project id required", http.StatusBadRequest)
 		return
 	}
-	app.Status = "Created"
-	logs[app.Name] = append(logs[app.Name], "Cleaned up deployment")
-	w.WriteHeader(200)
+	if err := cleanProject(projectID); err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "cleaned", "project_id": projectID})
+}
+
+func cleanProjectHandler(w http.ResponseWriter, r *http.Request) {
+	cleanupHandler(w, r)
 }
 
 func rollbackHandler(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		App string `json:"app"`
+	projectID := projectIDFromRequest(r)
+	if projectID == "" {
+		var req RollbackRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err == nil {
+			projectID = req.ProjectID
+		}
 	}
-	json.NewDecoder(r.Body).Decode(&req)
-	app, ok := apps[req.App]
-	if !ok {
-		w.WriteHeader(404)
+	if projectID == "" {
+		http.Error(w, "project id required", http.StatusBadRequest)
 		return
 	}
-	if app.ActiveColor == "blue" {
-		app.ActiveColor = "green"
-	} else {
-		app.ActiveColor = "blue"
+	project, err := rollbackProject(projectID, publicHost(r))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
 	}
-	logs[app.Name] = append(logs[app.Name], "Rolled back deployment")
-	w.WriteHeader(200)
+	writeJSON(w, http.StatusOK, DeployResponse{ProjectID: project.ProjectID, LiveURL: project.LiveURL})
+}
+
+func rollbackProjectHandler(w http.ResponseWriter, r *http.Request) {
+	rollbackHandler(w, r)
 }
 
 func logsStreamHandler(w http.ResponseWriter, r *http.Request) {
-	appName := r.URL.Query().Get("app")
-	w.Header().Set("Content-Type", "application/json")
-	if l, ok := logs[appName]; ok {
-		json.NewEncoder(w).Encode(l)
-	} else {
-		json.NewEncoder(w).Encode([]string{"No logs found"})
+	projectID := projectIDFromRequest(r)
+	if projectID == "" {
+		projectID = r.URL.Query().Get("project_id")
 	}
-	// Optionally: append a new log line for demo
-	// logs[appName] = append(logs[appName], fmt.Sprintf("Live log line %d", time.Now().Unix()))
+	if projectID == "" {
+		projectID = r.URL.Query().Get("app")
+	}
+	lines, _ := logSvc.GetLogs(projectID, defaultLogSlot)
+	if len(lines) == 0 {
+		lines = []string{"No logs found"}
+	}
+	writeJSON(w, http.StatusOK, lines)
 }
 
 // Webhook endpoint for auto-deploy (GitHub, etc.)
 func webhookHandler(w http.ResponseWriter, r *http.Request) {
-	// TODO: Validate signature, parse event, trigger deploy if push event
-	w.WriteHeader(200)
-	w.Write([]byte("Webhook received (demo)"))
+	writeJSON(w, http.StatusOK, map[string]string{"status": "Webhook received (demo)"})
 }
 
 func repoInfoHandler(w http.ResponseWriter, r *http.Request) {
-	appName := r.URL.Query().Get("app")
-	app, ok := apps[appName]
+	projectID := projectIDFromRequest(r)
+	if projectID == "" {
+		projectID = r.URL.Query().Get("project_id")
+	}
+	project, ok := projects[projectID]
 	if !ok {
-		w.WriteHeader(404)
+		http.Error(w, "project not found", http.StatusNotFound)
 		return
 	}
-	// Simulate git info (replace with real git in production)
-	branch := "main"
-	commit := "Initial commit"
-	if app.Repo != "" {
-		cmd := exec.Command("git", "ls-remote", app.Repo, "HEAD")
-		out, err := cmd.Output()
-		if err == nil && len(out) > 0 {
-			commit = string(bytes.Fields(out)[0])
-		}
-	}
-	json.NewEncoder(w).Encode(map[string]string{
-		"repo":   app.Repo,
-		"branch": branch,
-		"commit": commit,
+	writeJSON(w, http.StatusOK, map[string]string{
+		"repo_url":    project.RepoURL,
+		"branch":      project.Branch,
+		"last_commit": "live",
+		"commit_time": timeNowString(),
 	})
 }
 
 func workersHandler(w http.ResponseWriter, r *http.Request) {
-	var out []map[string]string
-	for k, v := range workers {
-		out = append(out, map[string]string{"name": k, "ip": v})
+	switch r.Method {
+	case http.MethodGet:
+		workers, err := workerSvc.ListWorkers()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, workers)
+	case http.MethodPost:
+		var req struct {
+			Name string `json:"name"`
+			IP   string `json:"ip"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid request", http.StatusBadRequest)
+			return
+		}
+		if req.Name == "" || req.IP == "" {
+			http.Error(w, "name and ip are required", http.StatusBadRequest)
+			return
+		}
+		id := fmt.Sprintf("worker-%d", workerCount()+1)
+		workerObj := &worker.Worker{ID: id, Name: req.Name, IP: req.IP, Status: "active"}
+		if err := workerSvc.CreateWorker(workerObj); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		saveDashboardState()
+		writeJSON(w, http.StatusCreated, workerObj)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+func listProjects() []*App {
+	ids := make([]string, 0, len(projects))
+	for id := range projects {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	list := make([]*App, 0, len(ids))
+	for _, id := range ids {
+		list = append(list, projects[id])
+	}
+	return list
+}
+
+func projectIDFromRequest(r *http.Request) string {
+	path := strings.TrimPrefix(r.URL.Path, "/")
+	parts := strings.Split(path, "/")
+	if len(parts) < 2 {
+		return ""
+	}
+	if parts[1] == "stream" || parts[1] == "info" {
+		return ""
+	}
+	switch parts[0] {
+	case "clean", "rollback", "logs", "repo":
+		return parts[1]
+	default:
+		return ""
+	}
+}
+
+func writeJSON(w http.ResponseWriter, status int, payload interface{}) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(out)
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(payload)
+}
+
+func workerCount() int {
+	workers, err := workerSvc.ListWorkers()
+	if err != nil {
+		return 0
+	}
+	return len(workers)
+}
+
+func timeNowString() string {
+	return fmt.Sprintf("%d", time.Now().Unix())
 }

@@ -1,19 +1,40 @@
 package main
 
 type App struct {
-	Name        string
-	Repo        string
-	Worker      string
-	WorkerIP    string
-	Version     int
-	Status      string
-	ActiveColor string // blue or green
+	ProjectID      string `json:"project_id"`
+	Name           string `json:"name"`
+	RepoURL        string `json:"repo_url"`
+	Branch         string `json:"branch"`
+	WorkerID       string `json:"worker_id"`
+	WorkerName     string `json:"worker_name"`
+	WorkerIP       string `json:"worker_ip"`
+	Status         string `json:"status"`
+	Port           int    `json:"port"`
+	LiveURL        string `json:"live_url"`
+	WorkspaceDir   string `json:"workspace_dir,omitempty"`
+	ImageName      string `json:"image_name,omitempty"`
+	ContainerName  string `json:"container_name,omitempty"`
+	LastDeployment string `json:"last_deployment,omitempty"`
 }
 
-var apps = map[string]*App{}
-var logs = map[string][]string{}
-var workers = map[string]string{
-	"w1": "10.0.0.11",
-	"w2": "10.0.0.12",
-	"w3": "10.0.0.13",
+type DeployRequest struct {
+	RepoURL   string `json:"repo_url"`
+	Branch    string `json:"branch"`
+	WorkerID  string `json:"worker_id"`
+	ProjectID string `json:"project_id,omitempty"`
 }
+
+type DeployResponse struct {
+	ProjectID string `json:"project_id"`
+	LiveURL   string `json:"live_url"`
+}
+
+type CleanRequest struct {
+	ProjectID string `json:"project_id"`
+}
+
+type RollbackRequest struct {
+	ProjectID string `json:"project_id"`
+}
+
+var projects = map[string]*App{}
