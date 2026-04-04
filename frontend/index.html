@@ -681,10 +681,12 @@
 
       let activeCount = 0;
       workers.forEach((workerNode) => {
-        const option = document.createElement('option');
-        option.value = workerNode.id;
-        option.textContent = `${workerNode.name} (${workerNode.ip})`;
-        workerSelect.appendChild(option);
+        if ((workerNode.active_jobs || 0) === 0) {
+          const option = document.createElement('option');
+          option.value = workerNode.id;
+          option.textContent = `${workerNode.name} (${workerNode.ip})`;
+          workerSelect.appendChild(option);
+        }
 
         const row = document.createElement('div');
         row.className = 'worker-row';
@@ -697,10 +699,19 @@
         `;
         workersList.appendChild(row);
 
-        if ((workerNode.status || '').toLowerCase() === 'active') {
+        if ((workerNode.active_jobs || 0) === 0) {
           activeCount += 1;
         }
       });
+
+      if (!workerSelect.options.length) {
+        const option = document.createElement('option');
+        option.value = '';
+        option.textContent = 'No available workers';
+        option.disabled = true;
+        option.selected = true;
+        workerSelect.appendChild(option);
+      }
 
       document.getElementById('workers-total').textContent = String(workers.length);
       document.getElementById('workers-active').textContent = String(activeCount);

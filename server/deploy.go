@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -40,7 +41,7 @@ var workerIPs = map[string]string{
 }
 
 var (
-	stateStore  = storage.NewFileStorage("minidevopshub-state.json")
+	stateStore  = storage.NewFileStorage(resolveStateFilePath())
 	stateMu     sync.Mutex
 	projectsMu  sync.RWMutex
 	logsMu      sync.RWMutex
@@ -60,7 +61,22 @@ type dashboardState struct {
 func init() {
 	loadDashboardState()
 	seedDefaultWorkers()
+	syncAllWorkerLoads()
 	saveDashboardState()
+}
+
+func resolveStateFilePath() string {
+	if custom := strings.TrimSpace(os.Getenv("MINIDEVOPSHUB_STATE_FILE")); custom != "" {
+		_ = os.MkdirAll(filepath.Dir(custom), 0755)
+		return custom
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		return "minidevopshub-state.json"
+	}
+	stateDir := filepath.Join(home, ".minidevopshub")
+	_ = os.MkdirAll(stateDir, 0755)
+	return filepath.Join(stateDir, "state.json")
 }
 
 func loadDashboardState() {
@@ -139,6 +155,7 @@ func appendProjectLogLine(projectID, line string) {
 	if trimmed == "" {
 		return
 	}
+	log.Printf("[%s] %s", projectID, trimmed)
 	storeProjectLogs(projectID, []string{trimmed})
 }
 
@@ -208,11 +225,54 @@ func projectCountOnWorker(workerIP string) int {
 	defer projectsMu.RUnlock()
 	count := 0
 	for _, project := range projects {
-		if project != nil && project.WorkerIP == workerIP {
+		if project != nil && project.WorkerIP == workerIP && project.Status != "failed" && project.Status != "cleaned" {
 			count++
 		}
 	}
 	return count
+}
+
+func projectCountOnWorkerID(workerID string) int {
+	projectsMu.RLock()
+	defer projectsMu.RUnlock()
+	count := 0
+	for _, project := range projects {
+		if project != nil && project.WorkerID == workerID && project.Status != "failed" && project.Status != "cleaned" {
+			count++
+		}
+	}
+	return count
+}
+
+func syncWorkerLoad(workerID string) {
+	if strings.TrimSpace(workerID) == "" {
+		return
+	}
+	worker, err := workerSvc.GetWorker(workerID)
+	if err != nil || worker == nil {
+		return
+	}
+	count := projectCountOnWorkerID(workerID)
+	worker.ActiveJobs = count
+	if count > 0 {
+		worker.Status = "busy"
+	} else {
+		worker.Status = "active"
+	}
+	_ = workerSvc.UpdateWorker(worker)
+}
+
+func syncAllWorkerLoads() {
+	workers, err := workerSvc.ListWorkers()
+	if err != nil {
+		return
+	}
+	for _, worker := range workers {
+		if worker == nil {
+			continue
+		}
+		syncWorkerLoad(worker.ID)
+	}
 }
 
 func projectNameFromRepoURL(repoURL string) string {
@@ -336,6 +396,7 @@ func createOrUpdateProject(repoURL, branch, workerID, projectID string, requestH
 	}
 
 	setProject(project)
+	syncWorkerLoad(worker.ID)
 	appendProjectLogLine(projectID, fmt.Sprintf("[INFO] queued deploy for %s on %s", projectID, workerID))
 	_ = deploySvc.RecordLastConfig(projectID, &service.DeployConfig{
 		ProjectID:     projectID,
@@ -375,13 +436,7 @@ func chooseProjectPort(workerIP, projectID string) int {
 func runDeploy(projectID, repoURL, branch, workerID, requestHost string, port int) {
 	workerIP := workerIPs[workerID]
 	defer func() {
-		if worker, err := workerSvc.GetWorker(workerID); err == nil {
-			worker.ActiveJobs--
-			if worker.ActiveJobs < 0 {
-				worker.ActiveJobs = 0
-			}
-			_ = workerSvc.UpdateWorker(worker)
-		}
+		syncWorkerLoad(workerID)
 		saveDashboardState()
 	}()
 
@@ -447,25 +502,53 @@ func buildRemoteDeployCommand(projectID, repoURL, branch string, port int) strin
 	}
 
 	return fmt.Sprintf(`set -e
+docker rm -f app-%[1]s >/dev/null 2>&1 || true
 rm -rf /tmp/%[1]s
 %[2]s
 cd /tmp/%[1]s
+
+verify_running() {
+  if ! docker ps --filter "name=^/app-%[1]s$" --filter "status=running" --format '{{.Names}}' | grep -q "app-%[1]s"; then
+    echo "[ERROR] container app-%[1]s is not running" >&2
+    docker logs app-%[1]s 2>/dev/null | tail -n 120 >&2 || true
+    exit 1
+  fi
+}
+
+run_static_site() {
+  if [ -d dist ]; then
+    docker run -d --name app-%[1]s -p %[3]d:80 -v /tmp/%[1]s/dist:/usr/share/nginx/html:ro nginx:alpine
+    verify_running
+    exit 0
+  fi
+  if [ -d build ]; then
+    docker run -d --name app-%[1]s -p %[3]d:80 -v /tmp/%[1]s/build:/usr/share/nginx/html:ro nginx:alpine
+    verify_running
+    exit 0
+  fi
+  echo "[ERROR] build completed but no dist/ or build/ output found" >&2
+  exit 1
+}
+
 if [ -f Dockerfile ]; then
   echo "[INFO] Dockerfile detected"
 	if docker build -t app-%[1]s .; then
 		docker run -d --name app-%[1]s -p %[3]d:8080 app-%[1]s
+		verify_running
 	else
 		echo "[WARN] Docker build failed, checking fallback modes"
 		if [ -f build.sh ]; then
 			echo "[INFO] fallback build.sh detected"
 			chmod +x build.sh
 			./build.sh
+			run_static_site
 		else
 			PKG_FILE=$(find . -maxdepth 3 -name package.json | head -1)
 			if [ -n "$PKG_FILE" ]; then
 				APP_DIR=$(dirname "$PKG_FILE")
 				echo "[INFO] fallback package.json detected at $APP_DIR"
 				docker run -d --name app-%[1]s -p %[3]d:3000 -v /tmp/%[1]s/$APP_DIR:/app -w /app node:18 sh -c "npm install && npm start"
+				verify_running
 			else
 				echo "No supported build configuration found" >&2
 				exit 1
@@ -476,15 +559,18 @@ elif [ -f build.sh ]; then
   echo "[INFO] build.sh detected"
   chmod +x build.sh
   ./build.sh
+	run_static_site
 elif [ -f package.json ]; then
   echo "[INFO] package.json detected"
   docker run -d --name app-%[1]s -p %[3]d:3000 -v /tmp/%[1]s:/app -w /app node:18 sh -c "npm install && npm start"
+	verify_running
 else
 	PKG_FILE=$(find . -maxdepth 3 -name package.json | head -1)
 	if [ -n "$PKG_FILE" ]; then
 		APP_DIR=$(dirname "$PKG_FILE")
 		echo "[INFO] package.json detected at $APP_DIR"
 		docker run -d --name app-%[1]s -p %[3]d:3000 -v /tmp/%[1]s/$APP_DIR:/app -w /app node:18 sh -c "npm install && npm start"
+		verify_running
 	else
 		echo "No supported build configuration found" >&2
 		exit 1
@@ -503,6 +589,9 @@ func readPipe(pipe interface{ Read([]byte) (int, error) }, projectID string) {
 func markProjectFailed(projectID string, err error) {
 	appendProjectLogLine(projectID, fmt.Sprintf("[ERROR] %v", err))
 	updateProjectStatus(projectID, "failed")
+	if project, ok := getProject(projectID); ok {
+		syncWorkerLoad(project.WorkerID)
+	}
 	saveDashboardState()
 }
 
@@ -588,6 +677,7 @@ func cleanProject(projectID string) error {
 	_ = deploySvc.DeleteLastConfig(projectID)
 	_ = removeProjectNginxConfig(projectID)
 	_ = reloadNginx()
+	syncWorkerLoad(project.WorkerID)
 	saveDashboardState()
 	return nil
 }

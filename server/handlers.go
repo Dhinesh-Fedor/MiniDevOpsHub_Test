@@ -58,22 +58,15 @@ func deployHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "worker not found", http.StatusNotFound)
 		return
 	}
-	if !selectedWorker.IsAvailable() {
+	syncWorkerLoad(req.WorkerID)
+	selectedWorker, _ = workerSvc.GetWorker(req.WorkerID)
+	if selectedWorker != nil && !selectedWorker.IsAvailable() {
 		http.Error(w, fmt.Sprintf("worker %s is busy", req.WorkerID), http.StatusConflict)
 		return
 	}
 
-	// Mark worker as busy
-	selectedWorker.ActiveJobs++
-	_ = workerSvc.UpdateWorker(selectedWorker)
-
 	project, err := createOrUpdateProject(req.RepoURL, req.Branch, req.WorkerID, req.ProjectID, publicHost(r))
 	if err != nil {
-		selectedWorker.ActiveJobs--
-		if selectedWorker.ActiveJobs < 0 {
-			selectedWorker.ActiveJobs = 0
-		}
-		_ = workerSvc.UpdateWorker(selectedWorker)
 		if existing, ok := getProject(req.ProjectID); ok {
 			existing.Status = "failed"
 			saveDashboardState()
@@ -81,6 +74,7 @@ func deployHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	syncWorkerLoad(req.WorkerID)
 	writeJSON(w, http.StatusOK, DeployResponse{
 		ProjectID: project.ProjectID,
 		Worker:    project.WorkerID,
@@ -115,12 +109,8 @@ func cleanupHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Decrement worker's active_jobs after cleanup
-	if worker, err := workerSvc.GetWorker(project.WorkerID); err == nil && worker.ActiveJobs > 0 {
-		worker.ActiveJobs--
-		_ = workerSvc.UpdateWorker(worker)
-		saveDashboardState()
-	}
+	syncWorkerLoad(project.WorkerID)
+	saveDashboardState()
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "cleaned", "project_id": projectID})
 }
@@ -153,26 +143,18 @@ func rollbackHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Mark worker as busy for rollback operation
-	worker, err := workerSvc.GetWorker(project.WorkerID)
-	if err != nil {
+	if _, err := workerSvc.GetWorker(project.WorkerID); err != nil {
 		http.Error(w, "worker not found", http.StatusNotFound)
 		return
 	}
 
-	worker.ActiveJobs++
-	_ = workerSvc.UpdateWorker(worker)
-
 	rolledBackProject, err := rollbackProject(projectID, publicHost(r))
 	if err != nil {
-		worker.ActiveJobs--
-		if worker.ActiveJobs < 0 {
-			worker.ActiveJobs = 0
-		}
-		_ = workerSvc.UpdateWorker(worker)
+		syncWorkerLoad(project.WorkerID)
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
+	syncWorkerLoad(rolledBackProject.WorkerID)
 	writeJSON(w, http.StatusOK, DeployResponse{
 		ProjectID: rolledBackProject.ProjectID,
 		Worker:    rolledBackProject.WorkerID,
@@ -232,17 +214,28 @@ func workersHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		// Filter and return only available workers (active_jobs == 0)
-		availableWorkers := []*worker.Worker{}
-		for _, w := range workers {
-			if w.IsAvailable() {
-				availableWorkers = append(availableWorkers, w)
+		for _, workerItem := range workers {
+			if workerItem == nil {
+				continue
 			}
+			syncWorkerLoad(workerItem.ID)
 		}
-		sort.Slice(availableWorkers, func(i, j int) bool {
-			return availableWorkers[i].ID < availableWorkers[j].ID
+		workers, _ = workerSvc.ListWorkers()
+		availableOnly := strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("available")), "true")
+		result := make([]*worker.Worker, 0, len(workers))
+		for _, workerItem := range workers {
+			if workerItem == nil {
+				continue
+			}
+			if availableOnly && !workerItem.IsAvailable() {
+				continue
+			}
+			result = append(result, workerItem)
+		}
+		sort.Slice(result, func(i, j int) bool {
+			return result[i].ID < result[j].ID
 		})
-		writeJSON(w, http.StatusOK, availableWorkers)
+		writeJSON(w, http.StatusOK, result)
 	case http.MethodPost:
 		var req struct {
 			Name string `json:"name"`
