@@ -412,10 +412,11 @@ func runDeploy(projectID, repoURL, branch, workerID, requestHost string, port in
 
 	updateProjectStatus(projectID, "running")
 	updateProjectLiveURL(projectID, fmt.Sprintf("http://%s/%s/", requestHost, projectID))
+	version := nextDeploymentVersion(projectID)
 	_ = deploySvc.CreateDeployment(&deployment.Deployment{
 		ID:        randomID(),
 		AppID:     projectID,
-		Version:   1,
+		Version:   version,
 		Slot:      defaultLogSlot,
 		Status:    "live",
 		CreatedAt: time.Now().Format(time.RFC3339),
@@ -490,6 +491,14 @@ func markProjectFailed(projectID string, err error) {
 	appendProjectLogLine(projectID, fmt.Sprintf("[ERROR] %v", err))
 	updateProjectStatus(projectID, "failed")
 	saveDashboardState()
+}
+
+func nextDeploymentVersion(projectID string) int {
+	entries, err := deploySvc.ListDeployments(projectID)
+	if err != nil || len(entries) == 0 {
+		return 1
+	}
+	return len(entries) + 1
 }
 
 func removeRuntimeArtifactsSSH(project *App) error {
@@ -581,13 +590,33 @@ func writeProjectNginxConfig(project *App) error {
 		project.Port,
 	)
 	confPath := fmt.Sprintf("%s/%s.conf", nginxSitesDir, project.ProjectID)
-	return os.WriteFile(confPath, []byte(conf), 0644)
+	if err := os.WriteFile(confPath, []byte(conf), 0644); err == nil {
+		return nil
+	}
+	cmd := exec.Command("sudo", "tee", confPath)
+	cmd.Stdin = strings.NewReader(conf)
+	output, err := cmd.CombinedOutput()
+	if len(output) > 0 {
+		appendProjectLogLine(project.ProjectID, fmt.Sprintf("[INFO] nginx write output: %s", strings.TrimSpace(string(output))))
+	}
+	if err != nil {
+		return fmt.Errorf("write nginx config failed: %w", err)
+	}
+	return nil
 }
 
 func removeProjectNginxConfig(projectID string) error {
 	confPath := fmt.Sprintf("%s/%s.conf", nginxSitesDir, projectID)
-	if err := os.Remove(confPath); err != nil && !os.IsNotExist(err) {
-		return err
+	if err := os.Remove(confPath); err == nil || os.IsNotExist(err) {
+		return nil
+	}
+	cmd := exec.Command("sudo", "rm", "-f", confPath)
+	output, err := cmd.CombinedOutput()
+	if len(output) > 0 {
+		appendProjectLogLine(projectID, fmt.Sprintf("[INFO] nginx remove output: %s", strings.TrimSpace(string(output))))
+	}
+	if err != nil {
+		return fmt.Errorf("remove nginx config failed: %w", err)
 	}
 	return nil
 }
@@ -595,6 +624,10 @@ func removeProjectNginxConfig(projectID string) error {
 func reloadNginx() error {
 	cmd := exec.Command("nginx", "-s", "reload")
 	output, err := cmd.CombinedOutput()
+	if err != nil {
+		cmd = exec.Command("sudo", "nginx", "-s", "reload")
+		output, err = cmd.CombinedOutput()
+	}
 	if len(output) > 0 {
 		storeProjectLogs("system", strings.Split(strings.TrimSpace(string(output)), "\n"))
 		log.Printf("nginx reload output=%s", strings.TrimSpace(string(output)))
