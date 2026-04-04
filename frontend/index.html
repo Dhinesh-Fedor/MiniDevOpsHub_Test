@@ -366,6 +366,14 @@
       z-index: 20;
     }
 
+    .menu.portal {
+      position: fixed;
+      right: auto;
+      top: auto;
+      z-index: 10000;
+      min-width: 170px;
+    }
+
     .menu button {
       width: 100%;
       text-align: left;
@@ -570,7 +578,35 @@
       logText: "",
       followLogs: true,
       selectedProjectLiveURL: "",
+      openMenu: null,
     };
+
+    function isPrivateHost(hostname) {
+      if (!hostname) {
+        return false;
+      }
+      return /^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[0-1])\.)/.test(hostname);
+    }
+
+    function preferredProjectURL(project) {
+      if (!project || !project.project_id) {
+        return '';
+      }
+      const proxyPathURL = `${window.location.origin}/${project.project_id}/`;
+      const live = (project.live_url || '').trim();
+      if (!live) {
+        return proxyPathURL;
+      }
+      try {
+        const parsed = new URL(live);
+        if (isPrivateHost(parsed.hostname)) {
+          return proxyPathURL;
+        }
+        return live;
+      } catch (_) {
+        return proxyPathURL;
+      }
+    }
 
     function getByAnyId(ids) {
       for (const id of ids) {
@@ -600,7 +636,7 @@
 
     function setSelectedProject(project) {
       state.selectedProjectId = project ? project.project_id : null;
-      state.selectedProjectLiveURL = project && project.live_url ? project.live_url : "";
+      state.selectedProjectLiveURL = preferredProjectURL(project);
       const chip = document.getElementById('selected-project-chip');
       const label = document.getElementById('selected-project-label');
       const logsProjectLabel = document.getElementById('logs-project-label');
@@ -615,7 +651,7 @@
       chip.style.display = 'inline-flex';
       label.textContent = `${project.name} (${project.project_id})`;
       logsProjectLabel.textContent = project.project_id;
-      liveUrl.textContent = project.live_url || '--';
+      liveUrl.textContent = preferredProjectURL(project) || '--';
 
       document.querySelectorAll('#projects-body tr').forEach((row) => {
         row.classList.toggle('selected-row', row.getAttribute('data-project-id') === project.project_id);
@@ -680,6 +716,7 @@
       document.getElementById('project-count').textContent = `${projects.length} project${projects.length === 1 ? '' : 's'}`;
 
       projects.forEach((project) => {
+        const projectURL = preferredProjectURL(project);
         const row = document.createElement('tr');
         row.setAttribute('data-project-id', project.project_id);
         if (state.selectedProjectId === project.project_id) {
@@ -691,7 +728,7 @@
           <td>${project.name || project.repo_url || project.project_id}</td>
           <td>${project.worker_name || project.worker_id || '--'}</td>
           <td><span class="status ${project.status || ''}"><span class="dot connected"></span>${project.status || 'unknown'}</span></td>
-          <td>${project.live_url ? `<a class="live-link" href="${project.live_url}" target="_blank" rel="noreferrer">${project.live_url}</a>` : '--'}</td>
+          <td>${projectURL ? `<a class="live-link" href="${projectURL}" target="_blank" rel="noreferrer">${projectURL}</a>` : '--'}</td>
           <td>
             <details class="actions">
               <summary>Actions</summary>
@@ -706,6 +743,8 @@
         `;
         tbody.appendChild(row);
       });
+
+      attachActionsMenuPortals();
 
       if (tableWrap) {
         tableWrap.scrollTop = prevScrollTop;
@@ -755,8 +794,9 @@
     async function openProject(projectId) {
       const projects = await requestJSON('/projects');
       const project = projects.find((item) => item.project_id === projectId);
-      if (project && project.live_url) {
-        window.open(project.live_url, '_blank', 'noopener');
+      const projectURL = preferredProjectURL(project);
+      if (projectURL) {
+        window.open(projectURL, '_blank', 'noopener');
       }
     }
 
@@ -789,7 +829,8 @@
     async function addProjectRow(projectId, worker, liveUrl) {
       await loadProjects();
       if (liveUrl) {
-        document.getElementById('live-url').textContent = liveUrl;
+        const normalized = preferredProjectURL({ project_id: projectId, live_url: liveUrl });
+        document.getElementById('live-url').textContent = normalized || liveUrl;
       }
       if (projectId && worker) {
         console.log(`project=${projectId} worker=${worker}`);
@@ -798,6 +839,7 @@
 
     async function injectBuildingProject(projectId, repoUrl, workerId, liveUrl) {
       const tbody = document.getElementById('projects-body');
+      const projectedURL = preferredProjectURL({ project_id: projectId, live_url: liveUrl });
       const row = document.createElement('tr');
       row.setAttribute('data-project-id', projectId);
       row.classList.add('selected-row');
@@ -807,11 +849,92 @@
         <td>${repoUrl || projectId}</td>
         <td>${workerId || '--'}</td>
         <td><span class="status building"><span class="dot"></span>building</span></td>
-        <td>${liveUrl ? `<a class="live-link" href="${liveUrl}" target="_blank" rel="noreferrer">${liveUrl}</a>` : '--'}</td>
+        <td>${projectedURL ? `<a class="live-link" href="${projectedURL}" target="_blank" rel="noreferrer">${projectedURL}</a>` : '--'}</td>
         <td><span class="muted">Deploying...</span></td>
       `;
       tbody.prepend(row);
     }
+
+    function closeOpenActionMenu() {
+      if (!state.openMenu) {
+        return;
+      }
+      const { details, menu } = state.openMenu;
+      if (menu && menu.parentElement === document.body) {
+        details.appendChild(menu);
+      }
+      if (menu) {
+        menu.classList.remove('portal');
+        menu.style.left = '';
+        menu.style.top = '';
+      }
+      if (details) {
+        details.open = false;
+      }
+      state.openMenu = null;
+    }
+
+    function placeMenu(details, menu) {
+      const summary = details.querySelector('summary');
+      if (!summary) {
+        return;
+      }
+      const rect = summary.getBoundingClientRect();
+      const menuWidth = Math.max(menu.offsetWidth || 170, 170);
+      const left = Math.max(8, Math.min(window.innerWidth - menuWidth - 8, rect.right - menuWidth));
+      const top = Math.min(window.innerHeight - (menu.offsetHeight || 170) - 8, rect.bottom + 8);
+      menu.style.left = `${left}px`;
+      menu.style.top = `${Math.max(8, top)}px`;
+    }
+
+    function attachActionsMenuPortals() {
+      document.querySelectorAll('details.actions').forEach((details) => {
+        if (details.dataset.portalBound === '1') {
+          return;
+        }
+        details.dataset.portalBound = '1';
+        details.addEventListener('toggle', () => {
+          const menu = details.querySelector('.menu');
+          if (!menu) {
+            return;
+          }
+          if (details.open) {
+            if (state.openMenu && state.openMenu.details !== details) {
+              closeOpenActionMenu();
+            }
+            menu.classList.add('portal');
+            document.body.appendChild(menu);
+            placeMenu(details, menu);
+            state.openMenu = { details, menu };
+          } else if (state.openMenu && state.openMenu.details === details) {
+            closeOpenActionMenu();
+          }
+        });
+      });
+    }
+
+    document.addEventListener('click', (event) => {
+      if (!state.openMenu) {
+        return;
+      }
+      const { details, menu } = state.openMenu;
+      if (details.contains(event.target) || menu.contains(event.target)) {
+        return;
+      }
+      closeOpenActionMenu();
+    });
+
+    window.addEventListener('scroll', () => {
+      if (state.openMenu) {
+        placeMenu(state.openMenu.details, state.openMenu.menu);
+      }
+    }, true);
+
+    window.addEventListener('resize', () => {
+      if (state.openMenu) {
+        placeMenu(state.openMenu.details, state.openMenu.menu);
+      }
+    });
 
     document.getElementById('deploy-form').addEventListener('submit', async (event) => {
       event.preventDefault();
@@ -863,7 +986,7 @@
     });
 
     function hasOpenActionMenu() {
-      return document.querySelector('details.actions[open]') !== null;
+      return state.openMenu !== null;
     }
 
     setInterval(checkConnection, 5000);

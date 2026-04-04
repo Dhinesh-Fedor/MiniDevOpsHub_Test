@@ -258,6 +258,14 @@ func resolvedLiveURL(albHost, workerIP string, port int, projectID string) strin
 	return fmt.Sprintf("http://%s:%d/", workerIP, port)
 }
 
+func preferredPublicHost(requestHost string) string {
+	envHost := strings.TrimSpace(os.Getenv("ALB_HOST"))
+	if envHost != "" {
+		return envHost
+	}
+	return strings.TrimSpace(requestHost)
+}
+
 func sanitizeName(input string) string {
 	re := regexp.MustCompile(`[^a-zA-Z0-9_.-]+`)
 	cleaned := strings.ToLower(re.ReplaceAllString(input, "-"))
@@ -309,7 +317,7 @@ func createOrUpdateProject(repoURL, branch, workerID, projectID string, requestH
 	workspacePath := fmt.Sprintf("/tmp/%s", projectID)
 
 	hostPort := port
-	albHost := strings.TrimSpace(os.Getenv("ALB_HOST"))
+	publicHost := preferredPublicHost(requestHost)
 
 	project := &App{
 		ProjectID:     projectID,
@@ -321,7 +329,7 @@ func createOrUpdateProject(repoURL, branch, workerID, projectID string, requestH
 		WorkerIP:      worker.IP,
 		Status:        "building",
 		Port:          hostPort,
-		LiveURL:       resolvedLiveURL(albHost, worker.IP, hostPort, projectID),
+		LiveURL:       resolvedLiveURL(publicHost, worker.IP, hostPort, projectID),
 		WorkspaceDir:  workspacePath,
 		ImageName:     imageName,
 		ContainerName: containerName,
@@ -341,7 +349,7 @@ func createOrUpdateProject(repoURL, branch, workerID, projectID string, requestH
 		HostPort:      hostPort,
 		ContainerPort: 3000,
 	})
-	go runDeploy(projectID, repoURL, branch, workerID, albHost, hostPort)
+	go runDeploy(projectID, repoURL, branch, workerID, publicHost, hostPort)
 	saveDashboardState()
 	return project, nil
 }
