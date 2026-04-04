@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"os/exec"
 	"path"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -40,6 +42,8 @@ var workerIPs = map[string]string{
 var (
 	stateStore  = storage.NewFileStorage("minidevopshub-state.json")
 	stateMu     sync.Mutex
+	projectsMu  sync.RWMutex
+	logsMu      sync.RWMutex
 	workerSvc   = service.NewInMemoryWorkerService()
 	deploySvc   = service.NewInMemoryDeploymentService()
 	logSvc      = service.NewInMemoryLogService()
@@ -62,15 +66,22 @@ func init() {
 func loadDashboardState() {
 	state := dashboardState{}
 	if err := stateStore.Load(&state); err != nil {
+		projectsMu.Lock()
 		projects = map[string]*App{}
+		projectsMu.Unlock()
+		logsMu.Lock()
 		projectLogs = map[string][]string{}
+		logsMu.Unlock()
 		return
 	}
+	projectsMu.Lock()
 	if state.Projects != nil {
 		projects = state.Projects
 	} else {
 		projects = map[string]*App{}
 	}
+	projectsMu.Unlock()
+	logsMu.Lock()
 	if state.Logs != nil {
 		projectLogs = state.Logs
 		for projectID, lines := range state.Logs {
@@ -79,6 +90,7 @@ func loadDashboardState() {
 	} else {
 		projectLogs = map[string][]string{}
 	}
+	logsMu.Unlock()
 	if state.Workers != nil {
 		for _, worker := range state.Workers {
 			_ = workerSvc.CreateWorker(worker)
@@ -100,11 +112,15 @@ func saveDashboardState() {
 	stateMu.Lock()
 	defer stateMu.Unlock()
 	workers, _ := workerSvc.ListWorkers()
+	projectsMu.RLock()
+	logsMu.RLock()
 	state := dashboardState{
 		Projects: projects,
 		Logs:     projectLogs,
 		Workers:  workers,
 	}
+	projectsMu.RUnlock()
+	logsMu.RUnlock()
 	_ = stateStore.Save(&state)
 }
 
@@ -112,8 +128,91 @@ func storeProjectLogs(projectID string, lines []string) {
 	if len(lines) == 0 {
 		return
 	}
+	logsMu.Lock()
 	projectLogs[projectID] = append(projectLogs[projectID], lines...)
+	logsMu.Unlock()
 	_ = logSvc.AppendLog(projectID, defaultLogSlot, lines)
+}
+
+func appendProjectLogLine(projectID, line string) {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" {
+		return
+	}
+	storeProjectLogs(projectID, []string{trimmed})
+}
+
+func getProject(projectID string) (*App, bool) {
+	projectsMu.RLock()
+	defer projectsMu.RUnlock()
+	project, ok := projects[projectID]
+	return project, ok
+}
+
+func setProject(project *App) {
+	if project == nil {
+		return
+	}
+	projectsMu.Lock()
+	projects[project.ProjectID] = project
+	projectsMu.Unlock()
+}
+
+func deleteProject(projectID string) {
+	projectsMu.Lock()
+	delete(projects, projectID)
+	projectsMu.Unlock()
+}
+
+func listProjectsSnapshot() []*App {
+	projectsMu.RLock()
+	defer projectsMu.RUnlock()
+	ids := make([]string, 0, len(projects))
+	for id := range projects {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	list := make([]*App, 0, len(ids))
+	for _, id := range ids {
+		list = append(list, projects[id])
+	}
+	return list
+}
+
+func updateProjectStatus(projectID, status string) {
+	projectsMu.Lock()
+	defer projectsMu.Unlock()
+	if project, ok := projects[projectID]; ok {
+		project.Status = status
+	}
+}
+
+func updateProjectLiveURL(projectID, liveURL string) {
+	projectsMu.Lock()
+	defer projectsMu.Unlock()
+	if project, ok := projects[projectID]; ok {
+		project.LiveURL = liveURL
+	}
+}
+
+func updateProjectPort(projectID string, port int) {
+	projectsMu.Lock()
+	defer projectsMu.Unlock()
+	if project, ok := projects[projectID]; ok {
+		project.Port = port
+	}
+}
+
+func projectCountOnWorker(workerIP string) int {
+	projectsMu.RLock()
+	defer projectsMu.RUnlock()
+	count := 0
+	for _, project := range projects {
+		if project != nil && project.WorkerIP == workerIP {
+			count++
+		}
+	}
+	return count
 }
 
 func projectNameFromRepoURL(repoURL string) string {
@@ -192,7 +291,7 @@ func createOrUpdateProject(repoURL, branch, workerID, projectID string, requestH
 	_ = workerSvc.UpdateWorker(worker)
 
 	// If project exists, remove old artifacts from worker
-	if existing, ok := projects[projectID]; ok {
+	if existing, ok := getProject(projectID); ok {
 		_ = removeRuntimeArtifactsSSH(existing)
 	}
 
@@ -200,16 +299,6 @@ func createOrUpdateProject(repoURL, branch, workerID, projectID string, requestH
 	imageName := fmt.Sprintf("app-%s", projectID)
 	containerName := imageName
 	workspacePath := fmt.Sprintf("/tmp/%s", projectID)
-	cmd := generateDeploySSHCommand(repoURL, branch, projectID, port)
-
-	output, err := sshSvc.RunCommand(worker.IP, sshUser, sshKeyPath, cmd)
-	logs := ssh.ParseLogsFromOutput(output)
-	storeProjectLogs(projectID, logs)
-	log.Printf("deploy project=%s worker=%s ip=%s output=%s", projectID, workerID, worker.IP, output)
-
-	if err != nil {
-		return nil, fmt.Errorf("deployment on worker %s failed: %w", workerID, err)
-	}
 
 	hostPort := port
 	albHost := strings.TrimSpace(os.Getenv("ALB_HOST"))
@@ -225,7 +314,7 @@ func createOrUpdateProject(repoURL, branch, workerID, projectID string, requestH
 		WorkerID:      worker.ID,
 		WorkerName:    worker.Name,
 		WorkerIP:      worker.IP,
-		Status:        "running",
+		Status:        "building",
 		Port:          hostPort,
 		LiveURL:       fmt.Sprintf("http://%s/%s/", albHost, projectID),
 		WorkspaceDir:  workspacePath,
@@ -233,7 +322,8 @@ func createOrUpdateProject(repoURL, branch, workerID, projectID string, requestH
 		ContainerName: containerName,
 	}
 
-	projects[projectID] = project
+	setProject(project)
+	appendProjectLogLine(projectID, fmt.Sprintf("[INFO] queued deploy for %s on %s", projectID, workerID))
 	_ = deploySvc.RecordLastConfig(projectID, &service.DeployConfig{
 		ProjectID:     projectID,
 		RepoURL:       repoURL,
@@ -246,49 +336,20 @@ func createOrUpdateProject(repoURL, branch, workerID, projectID string, requestH
 		HostPort:      hostPort,
 		ContainerPort: 3000,
 	})
-	_ = deploySvc.CreateDeployment(&deployment.Deployment{
-		ID:        randomID(),
-		AppID:     projectID,
-		Version:   len(projectLogs[projectID]) + 1,
-		Slot:      defaultLogSlot,
-		Status:    "live",
-		CreatedAt: time.Now().Format(time.RFC3339),
-	})
-	if err := writeProjectNginxConfig(project); err != nil {
-		return nil, err
-	}
-	if err := reloadNginx(); err != nil {
-		return nil, err
-	}
+	go runDeploy(projectID, repoURL, branch, workerID, albHost, hostPort)
 	saveDashboardState()
 	return project, nil
 }
 
-func generateDeploySSHCommand(repoURL, branch, projectID string, port int) string {
-	if strings.TrimSpace(branch) == "" {
-		return fmt.Sprintf(
-			"rm -rf /tmp/%[1]s && git clone %[2]s /tmp/%[1]s && cd /tmp/%[1]s && docker build -t app-%[1]s . && docker run -d --name app-%[1]s -p %[3]d:8080 app-%[1]s",
-			projectID,
-			repoURL,
-			port,
-		)
-	}
-	return fmt.Sprintf(
-		"rm -rf /tmp/%[1]s && git clone --branch %[2]s %[3]s /tmp/%[1]s && cd /tmp/%[1]s && docker build -t app-%[1]s . && docker run -d --name app-%[1]s -p %[4]d:8080 app-%[1]s",
-		projectID,
-		branch,
-		repoURL,
-		port,
-	)
-}
-
 func chooseProjectPort(workerIP, projectID string) int {
 	used := map[int]bool{}
+	projectsMu.RLock()
 	for _, p := range projects {
 		if p != nil && p.WorkerIP == workerIP {
 			used[p.Port] = true
 		}
 	}
+	projectsMu.RUnlock()
 	randomBytes := make([]byte, 2)
 	_, _ = rand.Read(randomBytes)
 	candidate := defaultPortBase + (int(randomBytes[0]) * int(randomBytes[1]) % 2000)
@@ -296,6 +357,114 @@ func chooseProjectPort(workerIP, projectID string) int {
 		candidate++
 	}
 	return candidate
+}
+
+func runDeploy(projectID, repoURL, branch, workerID, requestHost string, port int) {
+	workerIP := workerIPs[workerID]
+	defer func() {
+		if worker, err := workerSvc.GetWorker(workerID); err == nil {
+			worker.ActiveJobs--
+			if worker.ActiveJobs < 0 {
+				worker.ActiveJobs = 0
+			}
+			_ = workerSvc.UpdateWorker(worker)
+		}
+		saveDashboardState()
+	}()
+
+	remoteCmd := buildRemoteDeployCommand(projectID, repoURL, branch, port)
+	cmd := exec.Command("ssh", "-i", sshKeyPath, sshUser+"@"+workerIP, remoteCmd)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		markProjectFailed(projectID, err)
+		return
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		markProjectFailed(projectID, err)
+		return
+	}
+
+	if err := cmd.Start(); err != nil {
+		markProjectFailed(projectID, err)
+		return
+	}
+
+	go readPipe(stdout, projectID)
+	go readPipe(stderr, projectID)
+
+	if err := cmd.Wait(); err != nil {
+		markProjectFailed(projectID, err)
+		return
+	}
+
+	project, ok := getProject(projectID)
+	if !ok {
+		markProjectFailed(projectID, fmt.Errorf("project not found after deploy"))
+		return
+	}
+	project.Port = port
+	project.LiveURL = fmt.Sprintf("http://%s/%s/", requestHost, projectID)
+	if err := writeProjectNginxConfig(project); err != nil {
+		markProjectFailed(projectID, err)
+		return
+	}
+
+	updateProjectStatus(projectID, "running")
+	updateProjectLiveURL(projectID, fmt.Sprintf("http://%s/%s/", requestHost, projectID))
+	_ = deploySvc.CreateDeployment(&deployment.Deployment{
+		ID:        randomID(),
+		AppID:     projectID,
+		Version:   1,
+		Slot:      defaultLogSlot,
+		Status:    "live",
+		CreatedAt: time.Now().Format(time.RFC3339),
+	})
+	_ = reloadNginx()
+	appendProjectLogLine(projectID, "[INFO] deployment completed successfully")
+	saveDashboardState()
+}
+
+func buildRemoteDeployCommand(projectID, repoURL, branch string, port int) string {
+	branch = strings.TrimSpace(branch)
+	cloneCmd := fmt.Sprintf("git clone %s /tmp/%s", repoURL, projectID)
+	if branch != "" {
+		cloneCmd = fmt.Sprintf("git clone --branch %s %s /tmp/%s", branch, repoURL, projectID)
+	}
+
+	return fmt.Sprintf(`set -e
+rm -rf /tmp/%[1]s
+%[2]s
+cd /tmp/%[1]s
+if [ -f Dockerfile ]; then
+  echo "[INFO] Dockerfile detected"
+  docker build -t app-%[1]s .
+  docker run -d --name app-%[1]s -p %[3]d:8080 app-%[1]s
+elif [ -f build.sh ]; then
+  echo "[INFO] build.sh detected"
+  chmod +x build.sh
+  ./build.sh
+elif [ -f package.json ]; then
+  echo "[INFO] package.json detected"
+  docker run -d --name app-%[1]s -p %[3]d:3000 -v /tmp/%[1]s:/app -w /app node:18 sh -c "npm install && npm start"
+else
+  echo "No supported build configuration found" >&2
+  exit 1
+fi
+`, projectID, cloneCmd, port)
+}
+
+func readPipe(pipe interface{ Read([]byte) (int, error) }, projectID string) {
+	scanner := bufio.NewScanner(pipe)
+	for scanner.Scan() {
+		appendProjectLogLine(projectID, scanner.Text())
+	}
+}
+
+func markProjectFailed(projectID string, err error) {
+	appendProjectLogLine(projectID, fmt.Sprintf("[ERROR] %v", err))
+	updateProjectStatus(projectID, "failed")
+	saveDashboardState()
 }
 
 func removeRuntimeArtifactsSSH(project *App) error {
@@ -332,7 +501,7 @@ func removeRuntimeArtifacts(project *App, removeWorkspace bool) error {
 }
 
 func redeployProject(projectID string, requestHost string) (*App, error) {
-	project, ok := projects[projectID]
+	project, ok := getProject(projectID)
 	if !ok {
 		return nil, service.ErrNotFound
 	}
@@ -347,22 +516,24 @@ func rollbackProject(projectID string, requestHost string) (*App, error) {
 	if config == nil {
 		return nil, service.ErrNotFound
 	}
-	if _, ok := projects[projectID]; !ok {
+	if _, ok := getProject(projectID); !ok {
 		return nil, service.ErrNotFound
 	}
 	return createOrUpdateProject(config.RepoURL, config.Branch, config.WorkerID, projectID, requestHost)
 }
 
 func cleanProject(projectID string) error {
-	project, ok := projects[projectID]
+	project, ok := getProject(projectID)
 	if !ok {
 		return service.ErrNotFound
 	}
 	if err := removeRuntimeArtifacts(project, true); err != nil {
 		return err
 	}
-	delete(projects, projectID)
+	deleteProject(projectID)
+	logsMu.Lock()
 	delete(projectLogs, projectID)
+	logsMu.Unlock()
 	_ = logSvc.ClearLogs(projectID)
 	_ = deploySvc.DeleteLastConfig(projectID)
 	_ = removeProjectNginxConfig(projectID)

@@ -302,7 +302,8 @@
     }
 
     .status.running { color: var(--accent-2); background: rgba(124, 224, 166, 0.08); }
-    .status.deploying { color: var(--warn); background: rgba(240, 208, 113, 0.09); }
+    .status.building { color: var(--warn); background: rgba(240, 208, 113, 0.09); }
+    .status.failed { color: var(--danger); background: rgba(239, 124, 138, 0.12); }
     .status.cleaned { color: var(--muted); background: rgba(255,255,255,0.05); }
 
     .status .dot { width: 8px; height: 8px; }
@@ -747,6 +748,21 @@
       }
     }
 
+    async function injectBuildingProject(projectId, repoUrl, workerId, liveUrl) {
+      const tbody = document.getElementById('projects-body');
+      const row = document.createElement('tr');
+      row.setAttribute('data-project-id', projectId);
+      row.innerHTML = `
+        <td>${projectId}</td>
+        <td>${repoUrl || projectId}</td>
+        <td>${workerId || '--'}</td>
+        <td><span class="status building"><span class="dot"></span>building</span></td>
+        <td>${liveUrl ? `<a class="live-link" href="${liveUrl}" target="_blank" rel="noreferrer">${liveUrl}</a>` : '--'}</td>
+        <td><span class="muted">Deploying...</span></td>
+      `;
+      tbody.prepend(row);
+    }
+
     document.getElementById('deploy-form').addEventListener('submit', async (event) => {
       event.preventDefault();
       const repoInput = getByAnyId(['repoInput', 'repo-url']);
@@ -757,6 +773,12 @@
       const response = await requestJSON('/deploy', {
         method: 'POST',
         body: JSON.stringify({ repo_url, branch, worker_id }),
+      });
+      await injectBuildingProject(response.project_id, repo_url, response.worker || worker_id, response.live_url || '--');
+      startLogPolling({
+        project_id: response.project_id,
+        name: repo_url,
+        live_url: response.live_url || '--',
       });
       await addProjectRow(response.project_id, response.worker, response.live_url || '--');
       if (response.live_url) {

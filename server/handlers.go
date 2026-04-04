@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"sort"
 	"strings"
 	"time"
 
@@ -25,14 +24,15 @@ func createAppHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	projectID := randomID()
-	projects[projectID] = &App{
+	project := &App{
 		ProjectID: projectID,
 		Name:      req.Name,
 		RepoURL:   req.Repo,
 		Status:    "created",
 	}
+	setProject(project)
 	saveDashboardState()
-	writeJSON(w, http.StatusOK, projects[projectID])
+	writeJSON(w, http.StatusOK, project)
 }
 
 func listAppsHandler(w http.ResponseWriter, r *http.Request) {
@@ -65,15 +65,18 @@ func deployHandler(w http.ResponseWriter, r *http.Request) {
 	// Mark worker as busy
 	selectedWorker.ActiveJobs++
 	_ = workerSvc.UpdateWorker(selectedWorker)
-	defer func() {
-		// Mark worker as available when deploy completes
-		selectedWorker.ActiveJobs--
-		_ = workerSvc.UpdateWorker(selectedWorker)
-		saveDashboardState()
-	}()
 
 	project, err := createOrUpdateProject(req.RepoURL, req.Branch, req.WorkerID, req.ProjectID, publicHost(r))
 	if err != nil {
+		selectedWorker.ActiveJobs--
+		if selectedWorker.ActiveJobs < 0 {
+			selectedWorker.ActiveJobs = 0
+		}
+		_ = workerSvc.UpdateWorker(selectedWorker)
+		if existing, ok := getProject(req.ProjectID); ok {
+			existing.Status = "failed"
+			saveDashboardState()
+		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -81,6 +84,7 @@ func deployHandler(w http.ResponseWriter, r *http.Request) {
 		ProjectID: project.ProjectID,
 		Worker:    project.WorkerID,
 		Port:      fmt.Sprintf("%d", project.Port),
+		Status:    project.Status,
 		LiveURL:   project.LiveURL,
 	})
 }
@@ -99,7 +103,7 @@ func cleanupHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Get project to find worker
-	project, ok := projects[projectID]
+	project, ok := getProject(projectID)
 	if !ok {
 		http.Error(w, "project not found", http.StatusNotFound)
 		return
@@ -138,9 +142,13 @@ func rollbackHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Get project to find worker
-	project, ok := projects[projectID]
+	project, ok := getProject(projectID)
 	if !ok {
 		http.Error(w, "project not found", http.StatusNotFound)
+		return
+	}
+	if project.Status != "running" {
+		http.Error(w, "rollback only allowed for running projects", http.StatusConflict)
 		return
 	}
 
@@ -153,15 +161,14 @@ func rollbackHandler(w http.ResponseWriter, r *http.Request) {
 
 	worker.ActiveJobs++
 	_ = workerSvc.UpdateWorker(worker)
-	defer func() {
-		// Mark worker as available when rollback completes
-		worker.ActiveJobs--
-		_ = workerSvc.UpdateWorker(worker)
-		saveDashboardState()
-	}()
 
 	rolledBackProject, err := rollbackProject(projectID, publicHost(r))
 	if err != nil {
+		worker.ActiveJobs--
+		if worker.ActiveJobs < 0 {
+			worker.ActiveJobs = 0
+		}
+		_ = workerSvc.UpdateWorker(worker)
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
@@ -169,6 +176,7 @@ func rollbackHandler(w http.ResponseWriter, r *http.Request) {
 		ProjectID: rolledBackProject.ProjectID,
 		Worker:    rolledBackProject.WorkerID,
 		Port:      fmt.Sprintf("%d", rolledBackProject.Port),
+		Status:    rolledBackProject.Status,
 		LiveURL:   rolledBackProject.LiveURL,
 	})
 }
@@ -202,7 +210,7 @@ func repoInfoHandler(w http.ResponseWriter, r *http.Request) {
 	if projectID == "" {
 		projectID = r.URL.Query().Get("project_id")
 	}
-	project, ok := projects[projectID]
+	project, ok := getProject(projectID)
 	if !ok {
 		http.Error(w, "project not found", http.StatusNotFound)
 		return
@@ -258,16 +266,7 @@ func workersHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func listProjects() []*App {
-	ids := make([]string, 0, len(projects))
-	for id := range projects {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-	list := make([]*App, 0, len(ids))
-	for _, id := range ids {
-		list = append(list, projects[id])
-	}
-	return list
+	return listProjectsSnapshot()
 }
 
 func projectIDFromRequest(r *http.Request) string {
