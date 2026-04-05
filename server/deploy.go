@@ -600,66 +600,36 @@ verify_running() {
   fi
 }
 
-run_static_site() {
-  if [ -d dist ]; then
-    docker run -d --name app-%[1]s -p %[3]d:80 -v /tmp/%[1]s/dist:/usr/share/nginx/html:ro nginx:alpine
-    verify_running
-    exit 0
-  fi
-  if [ -d build ]; then
-    docker run -d --name app-%[1]s -p %[3]d:80 -v /tmp/%[1]s/build:/usr/share/nginx/html:ro nginx:alpine
-    verify_running
-    exit 0
-  fi
-  echo "[ERROR] build completed but no dist/ or build/ output found" >&2
-  exit 1
-}
+echo "Project structure:"
+ls -la
+[ -d frontend ] && echo "frontend folder exists" && ls -la frontend
 
 if [ -f Dockerfile ]; then
   echo "[INFO] Dockerfile detected"
-	if docker build -t app-%[1]s .; then
-		docker run -d --name app-%[1]s -p %[3]d:8080 app-%[1]s
-		verify_running
-	else
-		echo "[WARN] Docker build failed, checking fallback modes"
-		if [ -f build.sh ]; then
-			echo "[INFO] fallback build.sh detected"
-			chmod +x build.sh
-			./build.sh
-			run_static_site
-		else
-			PKG_FILE=$(find . -maxdepth 3 -name package.json | head -1)
-			if [ -n "$PKG_FILE" ]; then
-				APP_DIR=$(dirname "$PKG_FILE")
-				echo "[INFO] fallback package.json detected at $APP_DIR"
-				docker run -d --name app-%[1]s -p %[3]d:3000 -v /tmp/%[1]s/$APP_DIR:/app -w /app node:18 sh -c "npm install && npm start"
-				verify_running
-			else
-				echo "No supported build configuration found" >&2
-				exit 1
-			fi
-		fi
-	fi
+  docker build -t app-%[1]s .
+  docker run -d --name app-%[1]s -p %[3]d:3000 app-%[1]s
+  verify_running
+elif [ -f package.json ]; then
+  echo "[INFO] Node app detected (root)"
+  docker run -d --name app-%[1]s -p %[3]d:3000 -v /tmp/%[1]s:/app -w /app node:18 sh -c "npm install && npm start"
+  verify_running
+elif [ -f frontend/package.json ]; then
+  echo "[INFO] Node app detected (frontend/)"
+  docker run -d --name app-%[1]s -p %[3]d:3000 -v /tmp/%[1]s/frontend:/app -w /app node:18 sh -c "npm install && npm start"
+  verify_running
 elif [ -f build.sh ]; then
   echo "[INFO] build.sh detected"
   chmod +x build.sh
-  ./build.sh
-	run_static_site
-elif [ -f package.json ]; then
-  echo "[INFO] package.json detected"
-  docker run -d --name app-%[1]s -p %[3]d:3000 -v /tmp/%[1]s:/app -w /app node:18 sh -c "npm install && npm start"
-	verify_running
+  if [ -d frontend ]; then
+    echo "[INFO] running build.sh inside frontend"
+    cd frontend && bash ../build.sh
+  else
+    bash build.sh
+  fi
+  verify_running
 else
-	PKG_FILE=$(find . -maxdepth 3 -name package.json | head -1)
-	if [ -n "$PKG_FILE" ]; then
-		APP_DIR=$(dirname "$PKG_FILE")
-		echo "[INFO] package.json detected at $APP_DIR"
-		docker run -d --name app-%[1]s -p %[3]d:3000 -v /tmp/%[1]s/$APP_DIR:/app -w /app node:18 sh -c "npm install && npm start"
-		verify_running
-	else
-		echo "No supported build configuration found" >&2
-		exit 1
-	fi
+  echo "[ERROR] No supported build configuration found" >&2
+  exit 1
 fi
 `, projectID, cloneCmd, port)
 }
