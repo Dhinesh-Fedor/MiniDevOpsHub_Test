@@ -4,10 +4,31 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 )
+
+type loggingResponseWriter struct {
+	http.ResponseWriter
+	statusCode int
+}
+
+func (w *loggingResponseWriter) WriteHeader(code int) {
+	w.statusCode = code
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func requestLogger(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		lrw := &loggingResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
+		next.ServeHTTP(lrw, r)
+		log.Printf("%s %s status=%d duration=%s", r.Method, r.URL.Path, lrw.statusCode, time.Since(start))
+	})
+}
 
 func main() {
 	log.Println("MiniDevOpsHub starting...")
+	http.DefaultServeMux = http.NewServeMux()
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		// If the path looks like an API or known backend route, 404
 		if strings.HasPrefix(r.URL.Path, "/app") ||
@@ -46,5 +67,5 @@ func main() {
 	// Serve static files from frontend/
 	fs := http.FileServer(http.Dir("frontend"))
 	http.Handle("/static/", http.StripPrefix("/static/", fs))
-	log.Fatal(http.ListenAndServe(":8080", nil))
+	log.Fatal(http.ListenAndServe(":8080", requestLogger(http.DefaultServeMux)))
 }

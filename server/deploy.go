@@ -440,7 +440,10 @@ func runDeploy(projectID, repoURL, branch, workerID, requestHost string, port in
 		saveDashboardState()
 	}()
 
+	appendProjectLogLine(projectID, fmt.Sprintf("[INFO] starting deploy on %s (%s:%d)", workerID, workerIP, port))
+
 	remoteCmd := buildRemoteDeployCommand(projectID, repoURL, branch, port)
+	appendProjectLogLine(projectID, fmt.Sprintf("[DEBUG] remote deploy command prepared for %s", workerIP))
 	cmd := exec.Command("ssh", "-i", sshKeyPath, sshUser+"@"+workerIP, remoteCmd)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -457,6 +460,7 @@ func runDeploy(projectID, repoURL, branch, workerID, requestHost string, port in
 		markProjectFailed(projectID, err)
 		return
 	}
+	appendProjectLogLine(projectID, "[DEBUG] ssh deploy process started")
 
 	go readPipe(stdout, projectID)
 	go readPipe(stderr, projectID)
@@ -473,8 +477,16 @@ func runDeploy(projectID, repoURL, branch, workerID, requestHost string, port in
 	}
 	project.Port = port
 	project.LiveURL = resolvedLiveURL(requestHost, workerIP, port, projectID)
+	if err := verifyWorkerUpstreamReachable(projectID, workerIP, port); err != nil {
+		markProjectFailed(projectID, err)
+		return
+	}
 	if err := writeProjectNginxConfig(project); err != nil {
 		markProjectFailed(projectID, err)
+		return
+	}
+	if err := reloadNginx(); err != nil {
+		markProjectFailed(projectID, fmt.Errorf("nginx reload failed: %w", err))
 		return
 	}
 
@@ -489,9 +501,30 @@ func runDeploy(projectID, repoURL, branch, workerID, requestHost string, port in
 		Status:    "live",
 		CreatedAt: time.Now().Format(time.RFC3339),
 	})
-	_ = reloadNginx()
 	appendProjectLogLine(projectID, "[INFO] deployment completed successfully")
 	saveDashboardState()
+}
+
+func verifyWorkerUpstreamReachable(projectID, workerIP string, port int) error {
+	target := fmt.Sprintf("http://%s:%d/", workerIP, port)
+	client := &http.Client{Timeout: 4 * time.Second}
+	var lastErr error
+	for attempt := 1; attempt <= 10; attempt++ {
+		resp, err := client.Get(target)
+		if err == nil {
+			_ = resp.Body.Close()
+			if resp.StatusCode < 500 {
+				appendProjectLogLine(projectID, fmt.Sprintf("[INFO] upstream reachable at %s (status=%d)", target, resp.StatusCode))
+				return nil
+			}
+			lastErr = fmt.Errorf("upstream status %d", resp.StatusCode)
+		} else {
+			lastErr = err
+		}
+		appendProjectLogLine(projectID, fmt.Sprintf("[WARN] upstream probe %d/10 failed for %s: %v", attempt, target, lastErr))
+		time.Sleep(2 * time.Second)
+	}
+	return fmt.Errorf("worker upstream unreachable (%s). Check worker security group and container startup. last error: %v", target, lastErr)
 }
 
 func buildRemoteDeployCommand(projectID, repoURL, branch string, port int) string {
@@ -581,8 +614,13 @@ fi
 
 func readPipe(pipe interface{ Read([]byte) (int, error) }, projectID string) {
 	scanner := bufio.NewScanner(pipe)
+	buf := make([]byte, 0, 64*1024)
+	scanner.Buffer(buf, 1024*1024)
 	for scanner.Scan() {
 		appendProjectLogLine(projectID, scanner.Text())
+	}
+	if err := scanner.Err(); err != nil {
+		appendProjectLogLine(projectID, fmt.Sprintf("[WARN] log stream read error: %v", err))
 	}
 }
 

@@ -695,7 +695,7 @@
             <div class="worker-name">${workerNode.name}</div>
             <div class="worker-meta">${workerNode.ip}</div>
           </div>
-          <div class="badge"><span class="dot connected"></span><span>${workerNode.status || 'active'}</span></div>
+          <div class="badge"><span class="dot connected"></span><span>${(workerNode.active_jobs || 0) > 0 ? 'busy' : 'active'}</span></div>
         `;
         workersList.appendChild(row);
 
@@ -954,6 +954,10 @@
       const repo_url = (repoInput && repoInput.value ? repoInput.value : '').trim();
       const branch = document.getElementById('branch').value.trim() || 'main';
       const worker_id = workerSelect ? workerSelect.value : '';
+      if (!worker_id) {
+        alert('No available worker right now. Wait for a running deployment to complete or clean a project.');
+        return;
+      }
       const response = await requestJSON('/deploy', {
         method: 'POST',
         body: JSON.stringify({ repo_url, branch, worker_id }),
