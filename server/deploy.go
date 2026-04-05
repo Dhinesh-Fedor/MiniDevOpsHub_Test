@@ -930,11 +930,28 @@ func reloadNginx() error {
 			storeProjectLogs("system", strings.Split(strings.TrimSpace(string(output)), "\n"))
 			log.Printf("nginx syntax check output=%s", strings.TrimSpace(string(output)))
 		}
-		return err
+		// Some environments require root privileges to read nginx pid/log paths.
+		testCmd = exec.Command("sudo", "nginx", "-t")
+		output, err = testCmd.CombinedOutput()
+		if err != nil {
+			if len(output) > 0 {
+				storeProjectLogs("system", strings.Split(strings.TrimSpace(string(output)), "\n"))
+				log.Printf("nginx syntax check output=%s", strings.TrimSpace(string(output)))
+			}
+			return err
+		}
 	}
 
 	reloadCmd := exec.Command("nginx", "-s", "reload")
 	output, err = reloadCmd.CombinedOutput()
+	if err != nil {
+		if len(output) > 0 {
+			storeProjectLogs("system", strings.Split(strings.TrimSpace(string(output)), "\n"))
+			log.Printf("nginx reload output=%s", strings.TrimSpace(string(output)))
+		}
+		reloadCmd = exec.Command("sudo", "nginx", "-s", "reload")
+		output, err = reloadCmd.CombinedOutput()
+	}
 	if len(output) > 0 {
 		storeProjectLogs("system", strings.Split(strings.TrimSpace(string(output)), "\n"))
 		log.Printf("nginx reload output=%s", strings.TrimSpace(string(output)))
