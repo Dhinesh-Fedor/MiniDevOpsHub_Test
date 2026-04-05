@@ -609,7 +609,7 @@ func buildRemoteDeployCommand(projectID, repoURL, branch string, port int) strin
 
 	return fmt.Sprintf(`set -e
 docker rm -f app-%[1]s >/dev/null 2>&1 || true
-rm -rf /tmp/%[1]s
+	sudo rm -rf /tmp/%[1]s || true
 %[2]s
 cd /tmp/%[1]s
 
@@ -626,7 +626,11 @@ run_node_container() {
 	echo "[INFO] starting node app from $APP_DIR"
 	if [ -f "/tmp/%[1]s/$APP_DIR/vite.config.js" ] || [ -f "/tmp/%[1]s/$APP_DIR/vite.config.ts" ] || grep -q '"vite"' "/tmp/%[1]s/$APP_DIR/package.json" || grep -q '"react-scripts"' "/tmp/%[1]s/$APP_DIR/package.json"; then
 		echo "[INFO] frontend framework detected; building production static assets"
-		docker run --rm -v /tmp/%[1]s/$APP_DIR:/app -w /app node:18 sh -c "npm install && npm run build"
+		if [ -f "/tmp/%[1]s/$APP_DIR/vite.config.js" ] || [ -f "/tmp/%[1]s/$APP_DIR/vite.config.ts" ] || grep -q '"vite"' "/tmp/%[1]s/$APP_DIR/package.json"; then
+			docker run --rm --user $(id -u):$(id -g) -v /tmp/%[1]s/$APP_DIR:/app -w /app node:18 sh -c "npm install && (npm run build -- --base '/%[1]s/' || npm run build)"
+		else
+			docker run --rm --user $(id -u):$(id -g) -v /tmp/%[1]s/$APP_DIR:/app -w /app node:18 sh -c "npm install && npm run build"
+		fi
 		if run_static_site_from "$APP_DIR"; then
 			return 0
 		fi
@@ -639,15 +643,27 @@ run_node_container() {
 
 run_static_site_from() {
 	OUT_DIR="$1"
+	cat >/tmp/%[1]s/.minidevopshub-nginx.conf <<'EOF'
+server {
+    listen 80;
+    server_name _;
+    root /usr/share/nginx/html;
+    index index.html;
+
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}
+EOF
 	if [ -d "$OUT_DIR/dist" ]; then
 		echo "[INFO] static dist detected at $OUT_DIR/dist"
-		docker run -d --name app-%[1]s -p %[3]d:80 -v /tmp/%[1]s/$OUT_DIR/dist:/usr/share/nginx/html:ro nginx:alpine
+		docker run -d --name app-%[1]s -p %[3]d:80 -v /tmp/%[1]s/$OUT_DIR/dist:/usr/share/nginx/html:ro -v /tmp/%[1]s/.minidevopshub-nginx.conf:/etc/nginx/conf.d/default.conf:ro nginx:alpine
 		verify_running
 		return 0
 	fi
 	if [ -d "$OUT_DIR/build" ]; then
 		echo "[INFO] static build detected at $OUT_DIR/build"
-		docker run -d --name app-%[1]s -p %[3]d:80 -v /tmp/%[1]s/$OUT_DIR/build:/usr/share/nginx/html:ro nginx:alpine
+		docker run -d --name app-%[1]s -p %[3]d:80 -v /tmp/%[1]s/$OUT_DIR/build:/usr/share/nginx/html:ro -v /tmp/%[1]s/.minidevopshub-nginx.conf:/etc/nginx/conf.d/default.conf:ro nginx:alpine
 		verify_running
 		return 0
 	fi
@@ -786,7 +802,7 @@ func removeRuntimeArtifactsSSH(project *App) error {
 	}
 
 	cleanupCmd := fmt.Sprintf(
-		"docker stop app-%[1]s >/dev/null 2>&1 || true; docker rm app-%[1]s >/dev/null 2>&1 || true; docker rmi app-%[1]s >/dev/null 2>&1 || true; rm -rf /tmp/%[1]s || true",
+		"docker stop app-%[1]s >/dev/null 2>&1 || true; docker rm app-%[1]s >/dev/null 2>&1 || true; docker rmi app-%[1]s >/dev/null 2>&1 || true; sudo rm -rf /tmp/%[1]s >/dev/null 2>&1 || true",
 		project.ProjectID,
 	)
 	output, err := sshSvc.RunCommand(worker.IP, sshUser, sshKeyPath, cleanupCmd)
