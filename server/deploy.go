@@ -28,6 +28,9 @@ import (
 
 const defaultLogSlot = "default"
 
+const maxCommitHistory = 10
+const autoDeployPollInterval = 5 * time.Second
+
 const (
 	sshUser         = "ubuntu"
 	sshKeyPath      = "/home/ubuntu/MiniDevOpsHub-Key.pem"
@@ -216,6 +219,81 @@ func updateProjectPrevCommitHash(projectID, hash string) {
 	}
 }
 
+func setProjectCommitHistory(projectID string, history []string) {
+	projectsMu.Lock()
+	defer projectsMu.Unlock()
+	if project, ok := projects[projectID]; ok {
+		project.CommitHistory = append([]string(nil), history...)
+		project.LastCommitHash = commitHistoryLast(history)
+		project.PrevCommitHash = commitHistoryPrev(history)
+	}
+}
+
+func commitHistoryLast(history []string) string {
+	if len(history) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(history[len(history)-1])
+}
+
+func commitHistoryPrev(history []string) string {
+	if len(history) < 2 {
+		return ""
+	}
+	return strings.TrimSpace(history[len(history)-2])
+}
+
+func appendProjectCommitHistory(projectID, revision string) []string {
+	revision = strings.TrimSpace(revision)
+	if revision == "" {
+		return nil
+	}
+	projectsMu.Lock()
+	defer projectsMu.Unlock()
+	project, ok := projects[projectID]
+	if !ok || project == nil {
+		return nil
+	}
+	history := append([]string(nil), project.CommitHistory...)
+	if len(history) > 0 && history[len(history)-1] == revision {
+		project.LastCommitHash = revision
+		project.PrevCommitHash = commitHistoryPrev(history)
+		return history
+	}
+	history = append(history, revision)
+	if len(history) > maxCommitHistory {
+		history = history[len(history)-maxCommitHistory:]
+	}
+	project.CommitHistory = append([]string(nil), history...)
+	project.LastCommitHash = commitHistoryLast(history)
+	project.PrevCommitHash = commitHistoryPrev(history)
+	return history
+}
+
+func rollbackProjectCommitHistory(projectID string) (string, error) {
+	projectsMu.Lock()
+	defer projectsMu.Unlock()
+	project, ok := projects[projectID]
+	if !ok || project == nil {
+		return "", service.ErrNotFound
+	}
+	if len(project.CommitHistory) < 2 {
+		return "", fmt.Errorf("rollback unavailable: no previous revision recorded")
+	}
+	target := project.CommitHistory[len(project.CommitHistory)-2]
+	project.CommitHistory = append([]string(nil), project.CommitHistory[:len(project.CommitHistory)-1]...)
+	project.LastCommitHash = commitHistoryLast(project.CommitHistory)
+	project.PrevCommitHash = commitHistoryPrev(project.CommitHistory)
+	if project.LastCommitHash != target {
+		project.LastCommitHash = target
+		if len(project.CommitHistory) == 0 || project.CommitHistory[len(project.CommitHistory)-1] != target {
+			project.CommitHistory = append(project.CommitHistory, target)
+		}
+		project.PrevCommitHash = commitHistoryPrev(project.CommitHistory)
+	}
+	return target, nil
+}
+
 func syncAutoDeployWatchers() {
 	for _, project := range listProjectsSnapshot() {
 		if project == nil {
@@ -247,39 +325,42 @@ func startAutoDeployLoop(projectID string) {
 	autoDeployMu.Unlock()
 
 	go func() {
-		ticker := time.NewTicker(30 * time.Second)
+		ticker := time.NewTicker(autoDeployPollInterval)
 		defer ticker.Stop()
+		checkOnce := func() {
+			project, ok := getProject(projectID)
+			if !ok || project == nil {
+				stopAutoDeployLoop(projectID)
+				return
+			}
+			if !project.AutoDeploy || project.Status == "building" {
+				return
+			}
+			head, err := resolveRemoteHead(project.RepoURL, project.Branch)
+			if err != nil {
+				appendProjectLogLine(projectID, fmt.Sprintf("[WARN] auto-deploy check failed: %v", err))
+				return
+			}
+			if project.LastCommitHash == "" {
+				updateProjectLastCommitHash(projectID, head)
+				saveDashboardState()
+				return
+			}
+			if head == project.LastCommitHash {
+				return
+			}
+			appendProjectLogLine(projectID, fmt.Sprintf("[INFO] auto-deploy detected new commit %s", head))
+			if _, err := redeployProject(projectID, ""); err != nil {
+				appendProjectLogLine(projectID, fmt.Sprintf("[WARN] auto-deploy redeploy failed: %v", err))
+			}
+		}
+		checkOnce()
 		for {
 			select {
 			case <-stop:
 				return
 			case <-ticker.C:
-				project, ok := getProject(projectID)
-				if !ok || project == nil {
-					stopAutoDeployLoop(projectID)
-					return
-				}
-				if !project.AutoDeploy || project.Status == "building" {
-					continue
-				}
-				head, err := resolveRemoteHead(project.RepoURL, project.Branch)
-				if err != nil {
-					appendProjectLogLine(projectID, fmt.Sprintf("[WARN] auto-deploy check failed: %v", err))
-					continue
-				}
-				if project.LastCommitHash == "" {
-					updateProjectLastCommitHash(projectID, head)
-					saveDashboardState()
-					continue
-				}
-				if head == project.LastCommitHash {
-					continue
-				}
-				appendProjectLogLine(projectID, fmt.Sprintf("[INFO] auto-deploy detected new commit %s", head))
-				if _, err := redeployProject(projectID, ""); err != nil {
-					appendProjectLogLine(projectID, fmt.Sprintf("[WARN] auto-deploy redeploy failed: %v", err))
-					continue
-				}
+				checkOnce()
 			}
 		}
 	}()
@@ -738,13 +819,7 @@ func runDeploy(projectID, repoURL, branch, workerID, requestHost string, port in
 		}
 	}
 	if targetHead != "" {
-		if current, ok := getProject(projectID); ok {
-			prev := strings.TrimSpace(current.LastCommitHash)
-			if prev != "" && prev != targetHead {
-				updateProjectPrevCommitHash(projectID, prev)
-			}
-		}
-		updateProjectLastCommitHash(projectID, targetHead)
+		appendProjectCommitHistory(projectID, targetHead)
 	}
 	version := nextDeploymentVersion(projectID)
 	_ = deploySvc.CreateDeployment(&deployment.Deployment{
@@ -1044,9 +1119,9 @@ func rollbackProject(projectID string, requestHost string) (*App, error) {
 	if !ok {
 		return nil, service.ErrNotFound
 	}
-	targetRevision := strings.TrimSpace(project.PrevCommitHash)
-	if targetRevision == "" {
-		return nil, fmt.Errorf("rollback unavailable: no previous revision recorded")
+	targetRevision, err := rollbackProjectCommitHistory(projectID)
+	if err != nil {
+		return nil, err
 	}
 	if project.AutoDeploy {
 		_, _ = setAutoDeploy(projectID, false)
@@ -1087,12 +1162,14 @@ func writeProjectNginxConfig(project *App) error {
 		}
 	}
 	conf := fmt.Sprintf(
-		"location = /%s {\n    return 301 /%s/;\n}\n\nlocation /%s/ {\n    proxy_pass http://%s:%d;\n\n    proxy_http_version 1.1;\n\n    proxy_set_header Host $host;\n    proxy_set_header X-Real-IP $remote_addr;\n    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n\n    # FIX: correct rewrite logic\n    rewrite ^/%s/(.*)$ /$1 break;\n\n    # FIX: ensure root works\n    rewrite ^/%s/$ / break;\n\n    proxy_intercept_errors on;\n}\n",
+		"location = /%s {\n    return 301 /%s/;\n}\n\nlocation /%s/ {\n    proxy_pass http://%s:%d;\n\n    proxy_http_version 1.1;\n\n    proxy_set_header Host $host;\n    proxy_set_header X-Real-IP $remote_addr;\n    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n    proxy_set_header X-Forwarded-Prefix /%s;\n\n    # FIX: correct rewrite logic\n    rewrite ^/%s/(.*)$ /$1 break;\n\n    # FIX: ensure root works\n    rewrite ^/%s/$ / break;\n\n    # Keep absolute upstream redirects inside project prefix\n    proxy_redirect ~^/(.*)$ /%s/$1;\n\n    proxy_intercept_errors on;\n}\n",
 		project.ProjectID,
 		project.ProjectID,
 		project.ProjectID,
 		project.WorkerIP,
 		project.Port,
+		project.ProjectID,
+		project.ProjectID,
 		project.ProjectID,
 		project.ProjectID,
 	)

@@ -391,7 +391,8 @@
       display: grid;
       grid-template-rows: auto auto 1fr auto;
       gap: 12px;
-      min-height: 460px;
+      min-height: 420px;
+      min-width: 0;
     }
 
     .logs-meta {
@@ -402,8 +403,8 @@
     }
 
     .logs {
-      min-height: 300px;
-      max-height: 320px;
+      min-height: 240px;
+      max-height: 300px;
       overflow: auto;
       padding: 14px;
       border-radius: 16px;
@@ -420,6 +421,7 @@
       display: grid;
       gap: 12px;
       min-width: 0;
+      overflow: hidden;
     }
 
     .repo-card code {
@@ -430,14 +432,19 @@
       background: rgba(255,255,255,0.03);
       border: 1px solid rgba(145, 168, 255, 0.12);
       color: #cbd8ff;
-      white-space: normal;
-      overflow-wrap: anywhere;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
       line-height: 1.45;
+      font-size: 0.92rem;
+      max-width: 100%;
     }
 
     .footer-note {
       color: var(--muted);
       font-size: 0.88rem;
+      line-height: 1.4;
+      word-break: break-word;
     }
 
     .live-badge {
