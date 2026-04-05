@@ -167,6 +167,9 @@ func rehydrateDeployStateFromProjects() {
 				project.WorkerIP = ip
 			}
 		}
+		if inferred, ok := inferAutoDeployFromLogs(project.ProjectID, project.AutoDeploy); ok {
+			project.AutoDeploy = inferred
+		}
 		project.CommitHistory = normalizeCommitHistory(project.CommitHistory, project.PrevCommitHash, project.LastCommitHash)
 		project.LastCommitHash = commitHistoryLast(project.CommitHistory)
 		project.PrevCommitHash = commitHistoryPrev(project.CommitHistory)
@@ -184,6 +187,23 @@ func rehydrateDeployStateFromProjects() {
 			HostPort:      project.Port,
 		})
 	}
+	go saveDashboardState()
+}
+
+func inferAutoDeployFromLogs(projectID string, current bool) (bool, bool) {
+	logsMu.RLock()
+	defer logsMu.RUnlock()
+	lines := projectLogs[projectID]
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.ToLower(strings.TrimSpace(lines[i]))
+		if strings.Contains(line, "auto-deploy enabled") {
+			return true, true
+		}
+		if strings.Contains(line, "auto-deploy disabled") {
+			return false, true
+		}
+	}
+	return current, false
 }
 
 func seedDefaultWorkers() {
