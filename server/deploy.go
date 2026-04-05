@@ -624,7 +624,16 @@ verify_running() {
 run_node_container() {
 	APP_DIR="$1"
 	echo "[INFO] starting node app from $APP_DIR"
-	docker run -d --name app-%[1]s -p %[3]d:3000 -e HOST=0.0.0.0 -e PORT=3000 -v /tmp/%[1]s/$APP_DIR:/app -w /app node:18 sh -c "npm install && (npm start -- --host 0.0.0.0 --port 3000 || npm run dev -- --host 0.0.0.0 --port 3000 || (npm run build && npm run preview -- --host 0.0.0.0 --port 3000) || node server.js || node app.js)"
+	if [ -f "/tmp/%[1]s/$APP_DIR/vite.config.js" ] || [ -f "/tmp/%[1]s/$APP_DIR/vite.config.ts" ] || grep -q '"vite"' "/tmp/%[1]s/$APP_DIR/package.json" || grep -q '"react-scripts"' "/tmp/%[1]s/$APP_DIR/package.json"; then
+		echo "[INFO] frontend framework detected; building production static assets"
+		docker run --rm -v /tmp/%[1]s/$APP_DIR:/app -w /app node:18 sh -c "npm install && npm run build"
+		if run_static_site_from "$APP_DIR"; then
+			return 0
+		fi
+		echo "[ERROR] build finished but dist/build folder not found for $APP_DIR" >&2
+		exit 1
+	fi
+	docker run -d --name app-%[1]s -p %[3]d:3000 -e HOST=0.0.0.0 -e PORT=3000 -v /tmp/%[1]s/$APP_DIR:/app -w /app node:18 sh -c "npm install && (npm start || node server.js || node app.js)"
 	verify_running
 }
 
