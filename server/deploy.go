@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -31,7 +32,7 @@ const (
 	sshUser         = "ubuntu"
 	sshKeyPath      = "/home/ubuntu/MiniDevOpsHub-Key.pem"
 	nginxRoutesDir  = "/etc/nginx/minidevopshub-routes"
-	defaultPortBase = 18080
+	defaultPortBase = 9000
 )
 
 var workerIPs = map[string]string{
@@ -248,6 +249,27 @@ func projectCountOnWorkerID(workerID string) int {
 	return count
 }
 
+func activeProjectOnWorker(workerID, excludeProjectID string) (string, bool) {
+	projectsMu.RLock()
+	defer projectsMu.RUnlock()
+	for id, project := range projects {
+		if project == nil {
+			continue
+		}
+		if project.WorkerID != workerID {
+			continue
+		}
+		if excludeProjectID != "" && id == excludeProjectID {
+			continue
+		}
+		if project.Status == "failed" || project.Status == "cleaned" {
+			continue
+		}
+		return id, true
+	}
+	return "", false
+}
+
 func syncWorkerLoad(workerID string) {
 	if strings.TrimSpace(workerID) == "" {
 		return
@@ -410,6 +432,9 @@ func createOrUpdateProject(repoURL, branch, workerID, projectID string, requestH
 	if !ok {
 		return nil, fmt.Errorf("unknown worker_id: %s", workerID)
 	}
+	if existingProjectID, busy := activeProjectOnWorker(workerID, projectID); busy {
+		return nil, fmt.Errorf("worker %s is busy with active project %s", workerID, existingProjectID)
+	}
 	worker, err := workerSvc.GetWorker(workerID)
 	if err != nil {
 		worker = &internalworker.Worker{ID: workerID, Name: workerID, IP: workerIP, Status: "active", ActiveJobs: 0}
@@ -468,21 +493,17 @@ func createOrUpdateProject(repoURL, branch, workerID, projectID string, requestH
 }
 
 func chooseProjectPort(workerIP, projectID string) int {
-	used := map[int]bool{}
-	projectsMu.RLock()
-	for _, p := range projects {
-		if p != nil && p.WorkerIP == workerIP {
-			used[p.Port] = true
+	if fixed := strings.TrimSpace(os.Getenv("WORKER_FIXED_PORT")); fixed != "" {
+		if parsed, err := strconv.Atoi(fixed); err == nil && parsed > 0 {
+			return parsed
 		}
 	}
-	projectsMu.RUnlock()
-	randomBytes := make([]byte, 2)
-	_, _ = rand.Read(randomBytes)
-	candidate := defaultPortBase + (int(randomBytes[0]) * int(randomBytes[1]) % 2000)
-	for used[candidate] || candidate == 0 {
-		candidate++
+	if base := strings.TrimSpace(os.Getenv("WORKER_PORT_BASE")); base != "" {
+		if parsed, err := strconv.Atoi(base); err == nil && parsed > 0 {
+			return parsed
+		}
 	}
-	return candidate
+	return defaultPortBase
 }
 
 func runDeploy(projectID, repoURL, branch, workerID, requestHost string, port int) {
@@ -600,34 +621,108 @@ verify_running() {
   fi
 }
 
+run_node_container() {
+	APP_DIR="$1"
+	echo "[INFO] starting node app from $APP_DIR"
+	docker run -d --name app-%[1]s -p %[3]d:3000 -e HOST=0.0.0.0 -e PORT=3000 -v /tmp/%[1]s/$APP_DIR:/app -w /app node:18 sh -c "npm install && (npm start -- --host 0.0.0.0 --port 3000 || npm run dev -- --host 0.0.0.0 --port 3000 || (npm run build && npm run preview -- --host 0.0.0.0 --port 3000) || node server.js || node app.js)"
+	verify_running
+}
+
+run_static_site_from() {
+	OUT_DIR="$1"
+	if [ -d "$OUT_DIR/dist" ]; then
+		echo "[INFO] static dist detected at $OUT_DIR/dist"
+		docker run -d --name app-%[1]s -p %[3]d:80 -v /tmp/%[1]s/$OUT_DIR/dist:/usr/share/nginx/html:ro nginx:alpine
+		verify_running
+		return 0
+	fi
+	if [ -d "$OUT_DIR/build" ]; then
+		echo "[INFO] static build detected at $OUT_DIR/build"
+		docker run -d --name app-%[1]s -p %[3]d:80 -v /tmp/%[1]s/$OUT_DIR/build:/usr/share/nginx/html:ro nginx:alpine
+		verify_running
+		return 0
+	fi
+	return 1
+}
+
+generate_auto_dockerfile() {
+	APP_DIR="$1"
+	echo "[INFO] generating Dockerfile.auto for $APP_DIR"
+	cat > Dockerfile.auto <<EOF
+FROM node:18
+WORKDIR /app
+COPY $APP_DIR/package*.json ./
+RUN npm install
+COPY $APP_DIR/ ./
+ENV HOST=0.0.0.0
+ENV PORT=3000
+EXPOSE 3000
+CMD ["sh", "-lc", "npm start -- --host 0.0.0.0 --port 3000 || npm run dev -- --host 0.0.0.0 --port 3000 || (npm run build && npm run preview -- --host 0.0.0.0 --port 3000) || node server.js || node app.js"]
+EOF
+}
+
 echo "Project structure:"
 ls -la
 [ -d frontend ] && echo "frontend folder exists" && ls -la frontend
 
+DEPLOY_DONE=0
+
 if [ -f Dockerfile ]; then
   echo "[INFO] Dockerfile detected"
-  docker build -t app-%[1]s .
-  docker run -d --name app-%[1]s -p %[3]d:3000 app-%[1]s
-  verify_running
-elif [ -f package.json ]; then
+	if docker build -t app-%[1]s . && docker run -d --name app-%[1]s -p %[3]d:3000 app-%[1]s; then
+		verify_running
+		DEPLOY_DONE=1
+	else
+		echo "[WARN] Dockerfile build/run failed, trying adaptive detection"
+		docker rm -f app-%[1]s >/dev/null 2>&1 || true
+	fi
+fi
+
+if [ "$DEPLOY_DONE" -eq 0 ] && [ -f package.json ]; then
   echo "[INFO] Node app detected (root)"
-  docker run -d --name app-%[1]s -p %[3]d:3000 -v /tmp/%[1]s:/app -w /app node:18 sh -c "npm install && npm start"
-  verify_running
-elif [ -f frontend/package.json ]; then
+	run_node_container .
+	DEPLOY_DONE=1
+fi
+
+if [ "$DEPLOY_DONE" -eq 0 ] && [ -f frontend/package.json ]; then
   echo "[INFO] Node app detected (frontend/)"
-  docker run -d --name app-%[1]s -p %[3]d:3000 -v /tmp/%[1]s/frontend:/app -w /app node:18 sh -c "npm install && npm start"
-  verify_running
-elif [ -f build.sh ]; then
+	run_node_container frontend
+	DEPLOY_DONE=1
+fi
+
+if [ "$DEPLOY_DONE" -eq 0 ] && [ -f build.sh ]; then
   echo "[INFO] build.sh detected"
   chmod +x build.sh
   if [ -d frontend ]; then
     echo "[INFO] running build.sh inside frontend"
     cd frontend && bash ../build.sh
+		cd /tmp/%[1]s
+		if run_static_site_from frontend; then
+			DEPLOY_DONE=1
+		fi
   else
     bash build.sh
+		if run_static_site_from .; then
+			DEPLOY_DONE=1
+		fi
   fi
-  verify_running
-else
+fi
+
+if [ "$DEPLOY_DONE" -eq 0 ]; then
+	PKG_FILE=$(find . -maxdepth 4 -name package.json -not -path '*/node_modules/*' | head -1)
+	if [ -n "$PKG_FILE" ]; then
+		APP_DIR=$(dirname "$PKG_FILE" | sed 's|^\./||')
+		[ -z "$APP_DIR" ] && APP_DIR=.
+		echo "[INFO] adaptive detection found package.json at $APP_DIR"
+		generate_auto_dockerfile "$APP_DIR"
+		docker build -f Dockerfile.auto -t app-%[1]s .
+		docker run -d --name app-%[1]s -p %[3]d:3000 app-%[1]s
+		verify_running
+		DEPLOY_DONE=1
+	fi
+fi
+
+if [ "$DEPLOY_DONE" -eq 0 ]; then
   echo "[ERROR] No supported build configuration found" >&2
   exit 1
 fi
