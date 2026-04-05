@@ -191,6 +191,9 @@ func rehydrateDeployStateFromProjects() {
 }
 
 func inferAutoDeployFromLogs(projectID string, current bool) (bool, bool) {
+	if current {
+		return true, false
+	}
 	logsMu.RLock()
 	defer logsMu.RUnlock()
 	lines := projectLogs[projectID]
@@ -198,9 +201,6 @@ func inferAutoDeployFromLogs(projectID string, current bool) (bool, bool) {
 		line := strings.ToLower(strings.TrimSpace(lines[i]))
 		if strings.Contains(line, "auto-deploy enabled") {
 			return true, true
-		}
-		if strings.Contains(line, "auto-deploy disabled") {
-			return false, true
 		}
 	}
 	return current, false
@@ -279,6 +279,14 @@ func updateProjectAutoDeploy(projectID string, enabled bool) {
 	defer projectsMu.Unlock()
 	if project, ok := projects[projectID]; ok {
 		project.AutoDeploy = enabled
+	}
+}
+
+func updateProjectAutoDeployBlockedHead(projectID, blockedHead string) {
+	projectsMu.Lock()
+	defer projectsMu.Unlock()
+	if project, ok := projects[projectID]; ok {
+		project.AutoDeployBlockedHead = strings.TrimSpace(blockedHead)
 	}
 }
 
@@ -447,6 +455,14 @@ func startAutoDeployLoop(projectID string) {
 				saveDashboardState()
 				return
 			}
+			blocked := strings.TrimSpace(project.AutoDeployBlockedHead)
+			if blocked != "" {
+				if head == blocked {
+					return
+				}
+				updateProjectAutoDeployBlockedHead(projectID, "")
+				appendProjectLogLine(projectID, fmt.Sprintf("[INFO] auto-deploy resumed on new head %s", head))
+			}
 			if head == project.LastCommitHash {
 				return
 			}
@@ -483,6 +499,7 @@ func setAutoDeploy(projectID string, enabled bool) (*App, error) {
 		appendProjectLogLine(projectID, "[INFO] auto-deploy enabled")
 	} else {
 		stopAutoDeployLoop(projectID)
+		updateProjectAutoDeployBlockedHead(projectID, "")
 		appendProjectLogLine(projectID, "[INFO] auto-deploy disabled")
 	}
 	saveDashboardState()
@@ -829,12 +846,14 @@ func createOrUpdateProjectWithRevision(repoURL, branch, workerID, projectID stri
 	_ = workerSvc.UpdateWorker(worker)
 
 	autoDeployEnabled := false
+	autoDeployBlockedHead := ""
 	lastCommitHash := ""
 	prevCommitHash := ""
 
 	// If project exists, remove old artifacts from worker
 	if existing, ok := getProject(projectID); ok {
 		autoDeployEnabled = existing.AutoDeploy
+		autoDeployBlockedHead = existing.AutoDeployBlockedHead
 		lastCommitHash = existing.LastCommitHash
 		prevCommitHash = existing.PrevCommitHash
 		_ = removeRuntimeArtifactsSSH(existing)
@@ -852,22 +871,23 @@ func createOrUpdateProjectWithRevision(repoURL, branch, workerID, projectID stri
 	publicHost := preferredPublicHost(requestHost)
 
 	project := &App{
-		ProjectID:      projectID,
-		Name:           projectName,
-		RepoURL:        repoURL,
-		Branch:         branch,
-		AutoDeploy:     autoDeployEnabled,
-		LastCommitHash: lastCommitHash,
-		PrevCommitHash: prevCommitHash,
-		WorkerID:       worker.ID,
-		WorkerName:     worker.Name,
-		WorkerIP:       worker.IP,
-		Status:         "building",
-		Port:           hostPort,
-		LiveURL:        resolvedLiveURL(publicHost, worker.IP, hostPort, projectID),
-		WorkspaceDir:   workspacePath,
-		ImageName:      imageName,
-		ContainerName:  containerName,
+		ProjectID:             projectID,
+		Name:                  projectName,
+		RepoURL:               repoURL,
+		Branch:                branch,
+		AutoDeploy:            autoDeployEnabled,
+		AutoDeployBlockedHead: autoDeployBlockedHead,
+		LastCommitHash:        lastCommitHash,
+		PrevCommitHash:        prevCommitHash,
+		WorkerID:              worker.ID,
+		WorkerName:            worker.Name,
+		WorkerIP:              worker.IP,
+		Status:                "building",
+		Port:                  hostPort,
+		LiveURL:               resolvedLiveURL(publicHost, worker.IP, hostPort, projectID),
+		WorkspaceDir:          workspacePath,
+		ImageName:             imageName,
+		ContainerName:         containerName,
 	}
 
 	setProject(project)
@@ -1299,12 +1319,17 @@ func rollbackProject(projectID string, requestHost string) (*App, error) {
 		appendProjectLogLine(projectID, fmt.Sprintf("[INFO] inferred rollback target revision %s", targetRevision))
 	}
 	rollbackAutoDeploy := project.AutoDeploy
+	rollbackFromHead := strings.TrimSpace(project.LastCommitHash)
 	rolledBack, err := createOrUpdateProjectWithRevision(config.RepoURL, config.Branch, config.WorkerID, projectID, requestHost, nil, targetRevision)
 	if err != nil {
 		return nil, err
 	}
 	if rollbackAutoDeploy {
 		updateProjectAutoDeploy(projectID, true)
+		if rollbackFromHead != "" && rollbackFromHead != targetRevision {
+			updateProjectAutoDeployBlockedHead(projectID, rollbackFromHead)
+			appendProjectLogLine(projectID, fmt.Sprintf("[INFO] auto-deploy pinned until new commit after rollback (blocked head: %s)", rollbackFromHead))
+		}
 		startAutoDeployLoop(projectID)
 		appendProjectLogLine(projectID, "[INFO] auto-deploy preserved after rollback")
 	}
