@@ -22,8 +22,22 @@ func requestLogger(next http.Handler) http.Handler {
 		start := time.Now()
 		lrw := &loggingResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
 		next.ServeHTTP(lrw, r)
+		if isNoisyPollRequest(r) && lrw.statusCode < http.StatusBadRequest {
+			return
+		}
 		log.Printf("%s %s status=%d duration=%s", r.Method, r.URL.Path, lrw.statusCode, time.Since(start))
 	})
+}
+
+func isNoisyPollRequest(r *http.Request) bool {
+	if r == nil || r.Method != http.MethodGet {
+		return false
+	}
+	path := r.URL.Path
+	if path == "/healthz" || path == "/projects" || path == "/workers" || strings.HasPrefix(path, "/logs/") {
+		return true
+	}
+	return false
 }
 
 func main() {

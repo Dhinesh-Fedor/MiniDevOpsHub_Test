@@ -592,6 +592,9 @@
       if (!project || !project.project_id) {
         return '';
       }
+      if ((project.status || '').toLowerCase() !== 'running') {
+        return '';
+      }
       const proxyPathURL = `${window.location.origin}/${project.project_id}/`;
       const live = (project.live_url || '').trim();
       if (!live) {
@@ -805,6 +808,9 @@
     async function openProject(projectId) {
       const projects = await requestJSON('/projects');
       const project = projects.find((item) => item.project_id === projectId);
+      if (!project || (project.status || '').toLowerCase() !== 'running') {
+        return;
+      }
       const projectURL = preferredProjectURL(project);
       if (projectURL) {
         window.open(projectURL, '_blank', 'noopener');
@@ -850,7 +856,6 @@
 
     async function injectBuildingProject(projectId, repoUrl, workerId, liveUrl) {
       const tbody = document.getElementById('projects-body');
-      const projectedURL = preferredProjectURL({ project_id: projectId, live_url: liveUrl });
       const row = document.createElement('tr');
       row.setAttribute('data-project-id', projectId);
       row.classList.add('selected-row');
@@ -860,7 +865,7 @@
         <td>${repoUrl || projectId}</td>
         <td>${workerId || '--'}</td>
         <td><span class="status building"><span class="dot"></span>building</span></td>
-        <td>${projectedURL ? `<a class="live-link" href="${projectedURL}" target="_blank" rel="noreferrer">${projectedURL}</a>` : '--'}</td>
+        <td>--</td>
         <td><span class="muted">Deploying...</span></td>
       `;
       tbody.prepend(row);

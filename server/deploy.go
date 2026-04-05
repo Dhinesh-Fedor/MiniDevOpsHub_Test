@@ -62,6 +62,7 @@ func init() {
 	loadDashboardState()
 	seedDefaultWorkers()
 	syncAllWorkerLoads()
+	reconcileProjectRuntime()
 	saveDashboardState()
 }
 
@@ -201,6 +202,9 @@ func updateProjectStatus(projectID, status string) {
 	defer projectsMu.Unlock()
 	if project, ok := projects[projectID]; ok {
 		project.Status = status
+		if status == "failed" || status == "cleaned" {
+			project.LiveURL = ""
+		}
 	}
 }
 
@@ -272,6 +276,54 @@ func syncAllWorkerLoads() {
 			continue
 		}
 		syncWorkerLoad(worker.ID)
+	}
+}
+
+func isProjectContainerRunning(project *App) bool {
+	if project == nil {
+		return false
+	}
+	workerIP := strings.TrimSpace(project.WorkerIP)
+	if workerIP == "" {
+		if ip, ok := workerIPs[project.WorkerID]; ok {
+			workerIP = ip
+		}
+	}
+	if workerIP == "" {
+		return false
+	}
+	checkCmd := fmt.Sprintf("docker ps --filter \"name=^/app-%s$\" --filter \"status=running\" --format '{{.Names}}'", project.ProjectID)
+	output, err := sshSvc.RunCommand(workerIP, sshUser, sshKeyPath, checkCmd)
+	if err != nil {
+		appendProjectLogLine(project.ProjectID, fmt.Sprintf("[WARN] runtime health check failed: %v", err))
+		return false
+	}
+	return strings.Contains(output, "app-"+project.ProjectID)
+}
+
+func reconcileProjectRuntime() {
+	projects := listProjectsSnapshot()
+	nginxChanged := false
+	for _, project := range projects {
+		if project == nil {
+			continue
+		}
+		if project.Status == "cleaned" || project.Status == "failed" {
+			continue
+		}
+		if isProjectContainerRunning(project) {
+			continue
+		}
+		appendProjectLogLine(project.ProjectID, "[WARN] project runtime missing on startup; marking failed and removing route")
+		updateProjectStatus(project.ProjectID, "failed")
+		updateProjectLiveURL(project.ProjectID, "")
+		if err := removeProjectNginxConfig(project.ProjectID); err == nil {
+			nginxChanged = true
+		}
+		syncWorkerLoad(project.WorkerID)
+	}
+	if nginxChanged {
+		_ = reloadNginx()
 	}
 }
 
@@ -627,6 +679,14 @@ func readPipe(pipe interface{ Read([]byte) (int, error) }, projectID string) {
 func markProjectFailed(projectID string, err error) {
 	appendProjectLogLine(projectID, fmt.Sprintf("[ERROR] %v", err))
 	updateProjectStatus(projectID, "failed")
+	updateProjectLiveURL(projectID, "")
+	if removeErr := removeProjectNginxConfig(projectID); removeErr != nil {
+		appendProjectLogLine(projectID, fmt.Sprintf("[WARN] failed to remove nginx route: %v", removeErr))
+	} else {
+		if reloadErr := reloadNginx(); reloadErr != nil {
+			appendProjectLogLine(projectID, fmt.Sprintf("[WARN] nginx reload after failure cleanup failed: %v", reloadErr))
+		}
+	}
 	if project, ok := getProject(projectID); ok {
 		syncWorkerLoad(project.WorkerID)
 	}
