@@ -5,6 +5,8 @@ type App struct {
 	Name           string `json:"name"`
 	RepoURL        string `json:"repo_url"`
 	Branch         string `json:"branch"`
+	AutoDeploy     bool   `json:"auto_deploy"`
+	LastCommitHash string `json:"last_commit_hash,omitempty"`
 	WorkerID       string `json:"worker_id"`
 	WorkerName     string `json:"worker_name"`
 	WorkerIP       string `json:"worker_ip"`
@@ -18,10 +20,11 @@ type App struct {
 }
 
 type DeployRequest struct {
-	RepoURL   string `json:"repo_url"`
-	Branch    string `json:"branch"`
-	WorkerID  string `json:"worker_id"`
-	ProjectID string `json:"project_id,omitempty"`
+	RepoURL    string `json:"repo_url"`
+	Branch     string `json:"branch"`
+	WorkerID   string `json:"worker_id"`
+	ProjectID  string `json:"project_id,omitempty"`
+	AutoDeploy *bool  `json:"auto_deploy,omitempty"`
 }
 
 type DeployResponse struct {

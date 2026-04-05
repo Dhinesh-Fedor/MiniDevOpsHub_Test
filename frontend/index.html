@@ -493,9 +493,16 @@
                 <label for="worker-select">Worker</label>
                 <select id="worker-select"></select>
               </div>
+              <div class="field">
+                <label for="auto-deploy">Auto Deploy</label>
+                <select id="auto-deploy">
+                  <option value="false" selected>Off</option>
+                  <option value="true">On</option>
+                </select>
+              </div>
               <button class="btn" id="deployBtn" type="submit">Deploy</button>
             </form>
-            <div class="deploy-note">Deploy uses the selected worker, streams logs every 2 seconds, and publishes a live URL once the container is running.</div>
+            <div class="deploy-note">Deploy uses the selected worker, streams logs every 2 seconds, and publishes a live URL once the container is running. Auto deploy checks for new commits and redeploys automatically on the same worker.</div>
           </div>
         </section>
 
@@ -559,7 +566,7 @@
             <div class="badge"><span class="dot connected"></span><span id="logs-state">Polling off</span></div>
           </div>
           <div class="card-body">
-            <div id="logs" class="logs">Deploy a project or click Logs on a project row to start streaming output.</div>
+            <div id="logs" class="logs">Deploy a project or click a project row to start streaming output.</div>
           </div>
           <div class="card-body repo-card">
             <div class="muted">Live URL</div>
@@ -748,7 +755,8 @@
               <summary>Actions</summary>
               <div class="menu">
                 <button type="button" onclick="event.stopPropagation(); openProject('${project.project_id}')">Open</button>
-                <button type="button" onclick="event.stopPropagation(); selectProject('${project.project_id}')">Logs</button>
+                <button type="button" onclick="event.stopPropagation(); redeployProjectAction('${project.project_id}')">Redeploy</button>
+                <button type="button" onclick="event.stopPropagation(); toggleAutoDeploy('${project.project_id}', ${project.auto_deploy ? 'false' : 'true'})">Auto Deploy: ${project.auto_deploy ? 'On' : 'Off'}</button>
                 <button type="button" onclick="event.stopPropagation(); rollbackProject('${project.project_id}')">Rollback</button>
                 <button type="button" onclick="event.stopPropagation(); cleanProject('${project.project_id}')">Clean</button>
               </div>
@@ -841,6 +849,25 @@
       if (response.live_url) {
         document.getElementById('live-url').textContent = response.live_url;
       }
+    }
+
+    async function redeployProjectAction(projectId) {
+      const response = await requestJSON(`/redeploy/${projectId}`, { method: 'POST', body: JSON.stringify({ project_id: projectId }) });
+      await loadProjects();
+      const projects = await requestJSON('/projects');
+      const project = projects.find((item) => item.project_id === response.project_id);
+      if (project) {
+        startLogPolling(project);
+      }
+      await loadWorkers();
+    }
+
+    async function toggleAutoDeploy(projectId, enabled) {
+      await requestJSON(`/autodeploy/${projectId}`, {
+        method: 'POST',
+        body: JSON.stringify({ enabled: enabled === true || enabled === 'true' }),
+      });
+      await loadProjects();
     }
 
     async function addProjectRow(projectId, worker, liveUrl) {
@@ -958,27 +985,38 @@
       const workerSelect = getByAnyId(['workerSelect', 'worker-select']);
       const repo_url = (repoInput && repoInput.value ? repoInput.value : '').trim();
       const branch = document.getElementById('branch').value.trim() || 'main';
+      const auto_deploy = document.getElementById('auto-deploy').value === 'true';
       const worker_id = workerSelect ? workerSelect.value : '';
       if (!worker_id) {
         alert('No available worker right now. Wait for a running deployment to complete or clean a project.');
         return;
       }
-      const response = await requestJSON('/deploy', {
-        method: 'POST',
-        body: JSON.stringify({ repo_url, branch, worker_id }),
-      });
-      await injectBuildingProject(response.project_id, repo_url, response.worker || worker_id, response.live_url || '--');
-      startLogPolling({
-        project_id: response.project_id,
-        name: repo_url,
-        live_url: response.live_url || '--',
-      });
-      await addProjectRow(response.project_id, response.worker, response.live_url || '--');
-      await loadWorkers();
-      const projects = await requestJSON('/projects');
-      const project = projects.find((item) => item.project_id === response.project_id);
-      if (project) {
-        startLogPolling(project);
+
+      try {
+        const response = await requestJSON('/deploy', {
+          method: 'POST',
+          body: JSON.stringify({ repo_url, branch, worker_id, auto_deploy }),
+        });
+        await injectBuildingProject(response.project_id, repo_url, response.worker || worker_id, response.live_url || '--');
+        startLogPolling({
+          project_id: response.project_id,
+          name: repo_url,
+          live_url: response.live_url || '--',
+          auto_deploy,
+        });
+        await addProjectRow(response.project_id, response.worker, response.live_url || '--');
+        await loadWorkers();
+        const projects = await requestJSON('/projects');
+        const project = projects.find((item) => item.project_id === response.project_id);
+        if (project) {
+          startLogPolling(project);
+        }
+      } catch (error) {
+        alert(`Deploy failed: ${error.message}`);
+      } finally {
+        if (repoInput) {
+          repoInput.value = '';
+        }
       }
     });
 

@@ -42,15 +42,17 @@ var workerIPs = map[string]string{
 }
 
 var (
-	stateStore  = storage.NewFileStorage(resolveStateFilePath())
-	stateMu     sync.Mutex
-	projectsMu  sync.RWMutex
-	logsMu      sync.RWMutex
-	workerSvc   = service.NewInMemoryWorkerService()
-	deploySvc   = service.NewInMemoryDeploymentService()
-	logSvc      = service.NewInMemoryLogService()
-	sshSvc      = ssh.NewSSHService()
-	projectLogs = map[string][]string{}
+	stateStore       = storage.NewFileStorage(resolveStateFilePath())
+	stateMu          sync.Mutex
+	projectsMu       sync.RWMutex
+	logsMu           sync.RWMutex
+	autoDeployMu     sync.Mutex
+	workerSvc        = service.NewInMemoryWorkerService()
+	deploySvc        = service.NewInMemoryDeploymentService()
+	logSvc           = service.NewInMemoryLogService()
+	sshSvc           = ssh.NewSSHService()
+	projectLogs      = map[string][]string{}
+	autoDeployStopCh = map[string]chan struct{}{}
 )
 
 type dashboardState struct {
@@ -64,6 +66,7 @@ func init() {
 	seedDefaultWorkers()
 	syncAllWorkerLoads()
 	reconcileProjectRuntime()
+	syncAutoDeployWatchers()
 	saveDashboardState()
 }
 
@@ -178,9 +181,141 @@ func setProject(project *App) {
 }
 
 func deleteProject(projectID string) {
+	stopAutoDeployLoop(projectID)
 	projectsMu.Lock()
 	delete(projects, projectID)
 	projectsMu.Unlock()
+}
+
+func updateProjectAutoDeploy(projectID string, enabled bool) {
+	projectsMu.Lock()
+	defer projectsMu.Unlock()
+	if project, ok := projects[projectID]; ok {
+		project.AutoDeploy = enabled
+	}
+}
+
+func updateProjectLastCommitHash(projectID, hash string) {
+	hash = strings.TrimSpace(hash)
+	if hash == "" {
+		return
+	}
+	projectsMu.Lock()
+	defer projectsMu.Unlock()
+	if project, ok := projects[projectID]; ok {
+		project.LastCommitHash = hash
+	}
+}
+
+func syncAutoDeployWatchers() {
+	for _, project := range listProjectsSnapshot() {
+		if project == nil {
+			continue
+		}
+		if project.AutoDeploy {
+			startAutoDeployLoop(project.ProjectID)
+		}
+	}
+}
+
+func stopAutoDeployLoop(projectID string) {
+	autoDeployMu.Lock()
+	defer autoDeployMu.Unlock()
+	if stop, ok := autoDeployStopCh[projectID]; ok {
+		close(stop)
+		delete(autoDeployStopCh, projectID)
+	}
+}
+
+func startAutoDeployLoop(projectID string) {
+	autoDeployMu.Lock()
+	if _, exists := autoDeployStopCh[projectID]; exists {
+		autoDeployMu.Unlock()
+		return
+	}
+	stop := make(chan struct{})
+	autoDeployStopCh[projectID] = stop
+	autoDeployMu.Unlock()
+
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				project, ok := getProject(projectID)
+				if !ok || project == nil {
+					stopAutoDeployLoop(projectID)
+					return
+				}
+				if !project.AutoDeploy || project.Status == "building" {
+					continue
+				}
+				head, err := resolveRemoteHead(project.RepoURL, project.Branch)
+				if err != nil {
+					appendProjectLogLine(projectID, fmt.Sprintf("[WARN] auto-deploy check failed: %v", err))
+					continue
+				}
+				if project.LastCommitHash == "" {
+					updateProjectLastCommitHash(projectID, head)
+					saveDashboardState()
+					continue
+				}
+				if head == project.LastCommitHash {
+					continue
+				}
+				appendProjectLogLine(projectID, fmt.Sprintf("[INFO] auto-deploy detected new commit %s", head))
+				if _, err := redeployProject(projectID, ""); err != nil {
+					appendProjectLogLine(projectID, fmt.Sprintf("[WARN] auto-deploy redeploy failed: %v", err))
+					continue
+				}
+			}
+		}
+	}()
+}
+
+func setAutoDeploy(projectID string, enabled bool, requestHost string) (*App, error) {
+	project, ok := getProject(projectID)
+	if !ok || project == nil {
+		return nil, service.ErrNotFound
+	}
+	updateProjectAutoDeploy(projectID, enabled)
+	if enabled {
+		if head, err := resolveRemoteHead(project.RepoURL, project.Branch); err == nil {
+			updateProjectLastCommitHash(projectID, head)
+		}
+		startAutoDeployLoop(projectID)
+		appendProjectLogLine(projectID, "[INFO] auto-deploy enabled")
+	} else {
+		stopAutoDeployLoop(projectID)
+		appendProjectLogLine(projectID, "[INFO] auto-deploy disabled")
+	}
+	saveDashboardState()
+	project, _ = getProject(projectID)
+	return project, nil
+}
+
+func resolveRemoteHead(repoURL, branch string) (string, error) {
+	branch = strings.TrimSpace(branch)
+	if branch == "" {
+		branch = "main"
+	}
+	cmd := exec.Command("git", "ls-remote", repoURL, "refs/heads/"+branch)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("git ls-remote failed: %w", err)
+	}
+	line := strings.TrimSpace(string(output))
+	if line == "" {
+		return "", fmt.Errorf("no commit found for branch %s", branch)
+	}
+	parts := strings.Fields(strings.Split(line, "\n")[0])
+	if len(parts) == 0 {
+		return "", fmt.Errorf("unexpected git ls-remote output")
+	}
+	return parts[0], nil
 }
 
 func listProjectsSnapshot() []*App {
@@ -418,7 +553,7 @@ func randomID() string {
 	return hex.EncodeToString(bytes)
 }
 
-func createOrUpdateProject(repoURL, branch, workerID, projectID string, requestHost string) (*App, error) {
+func createOrUpdateProject(repoURL, branch, workerID, projectID string, requestHost string, autoDeploy *bool) (*App, error) {
 	branch = strings.TrimSpace(branch)
 	if branch == "" {
 		branch = "main"
@@ -443,9 +578,17 @@ func createOrUpdateProject(repoURL, branch, workerID, projectID string, requestH
 	worker.IP = workerIP
 	_ = workerSvc.UpdateWorker(worker)
 
+	autoDeployEnabled := false
+	lastCommitHash := ""
+
 	// If project exists, remove old artifacts from worker
 	if existing, ok := getProject(projectID); ok {
+		autoDeployEnabled = existing.AutoDeploy
+		lastCommitHash = existing.LastCommitHash
 		_ = removeRuntimeArtifactsSSH(existing)
+	}
+	if autoDeploy != nil {
+		autoDeployEnabled = *autoDeploy
 	}
 
 	port := chooseProjectPort(worker.IP, projectID)
@@ -457,22 +600,29 @@ func createOrUpdateProject(repoURL, branch, workerID, projectID string, requestH
 	publicHost := preferredPublicHost(requestHost)
 
 	project := &App{
-		ProjectID:     projectID,
-		Name:          projectName,
-		RepoURL:       repoURL,
-		Branch:        branch,
-		WorkerID:      worker.ID,
-		WorkerName:    worker.Name,
-		WorkerIP:      worker.IP,
-		Status:        "building",
-		Port:          hostPort,
-		LiveURL:       resolvedLiveURL(publicHost, worker.IP, hostPort, projectID),
-		WorkspaceDir:  workspacePath,
-		ImageName:     imageName,
-		ContainerName: containerName,
+		ProjectID:      projectID,
+		Name:           projectName,
+		RepoURL:        repoURL,
+		Branch:         branch,
+		AutoDeploy:     autoDeployEnabled,
+		LastCommitHash: lastCommitHash,
+		WorkerID:       worker.ID,
+		WorkerName:     worker.Name,
+		WorkerIP:       worker.IP,
+		Status:         "building",
+		Port:           hostPort,
+		LiveURL:        resolvedLiveURL(publicHost, worker.IP, hostPort, projectID),
+		WorkspaceDir:   workspacePath,
+		ImageName:      imageName,
+		ContainerName:  containerName,
 	}
 
 	setProject(project)
+	if project.AutoDeploy {
+		startAutoDeployLoop(projectID)
+	} else {
+		stopAutoDeployLoop(projectID)
+	}
 	syncWorkerLoad(worker.ID)
 	appendProjectLogLine(projectID, fmt.Sprintf("[INFO] queued deploy for %s on %s", projectID, workerID))
 	_ = deploySvc.RecordLastConfig(projectID, &service.DeployConfig{
@@ -565,6 +715,9 @@ func runDeploy(projectID, repoURL, branch, workerID, requestHost string, port in
 
 	updateProjectStatus(projectID, "running")
 	updateProjectLiveURL(projectID, resolvedLiveURL(requestHost, workerIP, port, projectID))
+	if head, err := resolveRemoteHead(repoURL, branch); err == nil {
+		updateProjectLastCommitHash(projectID, head)
+	}
 	version := nextDeploymentVersion(projectID)
 	_ = deploySvc.CreateDeployment(&deployment.Deployment{
 		ID:        randomID(),
@@ -664,6 +817,12 @@ EOF
 	if [ -d "$OUT_DIR/build" ]; then
 		echo "[INFO] static build detected at $OUT_DIR/build"
 		docker run -d --name app-%[1]s -p %[3]d:80 -v /tmp/%[1]s/$OUT_DIR/build:/usr/share/nginx/html:ro -v /tmp/%[1]s/.minidevopshub-nginx.conf:/etc/nginx/conf.d/default.conf:ro nginx:alpine
+		verify_running
+		return 0
+	fi
+	if [ -f "$OUT_DIR/index.html" ]; then
+		echo "[INFO] static index detected at $OUT_DIR/index.html"
+		docker run -d --name app-%[1]s -p %[3]d:80 -v /tmp/%[1]s/$OUT_DIR:/usr/share/nginx/html:ro -v /tmp/%[1]s/.minidevopshub-nginx.conf:/etc/nginx/conf.d/default.conf:ro nginx:alpine
 		verify_running
 		return 0
 	fi
@@ -832,7 +991,7 @@ func redeployProject(projectID string, requestHost string) (*App, error) {
 	if !ok {
 		return nil, service.ErrNotFound
 	}
-	return createOrUpdateProject(project.RepoURL, project.Branch, project.WorkerID, projectID, requestHost)
+	return createOrUpdateProject(project.RepoURL, project.Branch, project.WorkerID, projectID, requestHost, nil)
 }
 
 func rollbackProject(projectID string, requestHost string) (*App, error) {
@@ -846,7 +1005,7 @@ func rollbackProject(projectID string, requestHost string) (*App, error) {
 	if _, ok := getProject(projectID); !ok {
 		return nil, service.ErrNotFound
 	}
-	return createOrUpdateProject(config.RepoURL, config.Branch, config.WorkerID, projectID, requestHost)
+	return createOrUpdateProject(config.RepoURL, config.Branch, config.WorkerID, projectID, requestHost, nil)
 }
 
 func cleanProject(projectID string) error {

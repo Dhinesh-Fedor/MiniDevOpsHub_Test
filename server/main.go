@@ -54,6 +54,8 @@ func main() {
 		if strings.HasPrefix(r.URL.Path, "/app") ||
 			strings.HasPrefix(r.URL.Path, "/apps") ||
 			strings.HasPrefix(r.URL.Path, "/deploy") ||
+			strings.HasPrefix(r.URL.Path, "/redeploy") ||
+			strings.HasPrefix(r.URL.Path, "/autodeploy") ||
 			strings.HasPrefix(r.URL.Path, "/cleanup") ||
 			strings.HasPrefix(r.URL.Path, "/clean") ||
 			strings.HasPrefix(r.URL.Path, "/rollback") ||
@@ -74,6 +76,9 @@ func main() {
 	http.HandleFunc("/projects", listAppsHandler)
 	http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK); w.Write([]byte("ok")) })
 	http.HandleFunc("/deploy", deployHandler)
+	http.HandleFunc("/redeploy", redeployHandler)
+	http.HandleFunc("/redeploy/", redeployHandler)
+	http.HandleFunc("/autodeploy/", autoDeployHandler)
 	http.HandleFunc("/cleanup", cleanupHandler)
 	http.HandleFunc("/clean/", cleanupHandler)
 	http.HandleFunc("/rollback", rollbackHandler)

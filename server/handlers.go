@@ -65,7 +65,7 @@ func deployHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	project, err := createOrUpdateProject(req.RepoURL, req.Branch, req.WorkerID, req.ProjectID, publicHost(r))
+	project, err := createOrUpdateProject(req.RepoURL, req.Branch, req.WorkerID, req.ProjectID, publicHost(r), req.AutoDeploy)
 	if err != nil {
 		if existing, ok := getProject(req.ProjectID); ok {
 			existing.Status = "failed"
@@ -166,6 +166,60 @@ func rollbackHandler(w http.ResponseWriter, r *http.Request) {
 
 func rollbackProjectHandler(w http.ResponseWriter, r *http.Request) {
 	rollbackHandler(w, r)
+}
+
+func redeployHandler(w http.ResponseWriter, r *http.Request) {
+	projectID := projectIDFromRequest(r)
+	if projectID == "" {
+		var req struct {
+			ProjectID string `json:"project_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err == nil {
+			projectID = req.ProjectID
+		}
+	}
+	if projectID == "" {
+		http.Error(w, "project id required", http.StatusBadRequest)
+		return
+	}
+
+	project, err := redeployProject(projectID, publicHost(r))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	syncWorkerLoad(project.WorkerID)
+	writeJSON(w, http.StatusOK, DeployResponse{
+		ProjectID: project.ProjectID,
+		Worker:    project.WorkerID,
+		Port:      fmt.Sprintf("%d", project.Port),
+		Status:    project.Status,
+		LiveURL:   project.LiveURL,
+	})
+}
+
+func autoDeployHandler(w http.ResponseWriter, r *http.Request) {
+	projectID := projectIDFromRequest(r)
+	if projectID == "" {
+		http.Error(w, "project id required", http.StatusBadRequest)
+		return
+	}
+	var req struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	project, err := setAutoDeploy(projectID, req.Enabled, publicHost(r))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"project_id":  project.ProjectID,
+		"auto_deploy": project.AutoDeploy,
+	})
 }
 
 func logsStreamHandler(w http.ResponseWriter, r *http.Request) {
@@ -276,7 +330,7 @@ func projectIDFromRequest(r *http.Request) string {
 		return ""
 	}
 	switch parts[0] {
-	case "clean", "rollback", "logs", "repo":
+	case "clean", "rollback", "logs", "repo", "redeploy", "autodeploy":
 		return parts[1]
 	default:
 		return ""
