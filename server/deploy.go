@@ -451,6 +451,8 @@ func startAutoDeployLoop(projectID string) {
 				return
 			}
 			appendProjectLogLine(projectID, fmt.Sprintf("[INFO] auto-deploy detected new commit %s", head))
+			updateProjectStatus(projectID, "building")
+			saveDashboardState()
 			if _, err := redeployProject(projectID, ""); err != nil {
 				appendProjectLogLine(projectID, fmt.Sprintf("[WARN] auto-deploy redeploy failed: %v", err))
 			}
@@ -1296,11 +1298,17 @@ func rollbackProject(projectID string, requestHost string) (*App, error) {
 		targetRevision = inferred
 		appendProjectLogLine(projectID, fmt.Sprintf("[INFO] inferred rollback target revision %s", targetRevision))
 	}
-	if project.AutoDeploy {
-		_, _ = setAutoDeploy(projectID, false)
-		appendProjectLogLine(projectID, "[INFO] auto-deploy disabled for rollback")
+	rollbackAutoDeploy := project.AutoDeploy
+	rolledBack, err := createOrUpdateProjectWithRevision(config.RepoURL, config.Branch, config.WorkerID, projectID, requestHost, nil, targetRevision)
+	if err != nil {
+		return nil, err
 	}
-	return createOrUpdateProjectWithRevision(config.RepoURL, config.Branch, config.WorkerID, projectID, requestHost, nil, targetRevision)
+	if rollbackAutoDeploy {
+		updateProjectAutoDeploy(projectID, true)
+		startAutoDeployLoop(projectID)
+		appendProjectLogLine(projectID, "[INFO] auto-deploy preserved after rollback")
+	}
+	return rolledBack, nil
 }
 
 func cleanProject(projectID string) error {
