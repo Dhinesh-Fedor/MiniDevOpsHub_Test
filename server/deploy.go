@@ -489,6 +489,59 @@ func resolveRemoteHead(repoURL, branch string) (string, error) {
 	return parts[0], nil
 }
 
+func resolvePreviousRevision(repoURL, branch, currentRevision string) (string, error) {
+	branch = strings.TrimSpace(branch)
+	if branch == "" {
+		branch = "main"
+	}
+	currentRevision = strings.TrimSpace(currentRevision)
+
+	tmpDir, err := os.MkdirTemp("", "minidevopshub-rollback-*")
+	if err != nil {
+		return "", fmt.Errorf("create temp dir failed: %w", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	cloneCmd := exec.Command("git", "clone", "--filter=blob:none", "--no-checkout", "--depth", "50", "--branch", branch, repoURL, tmpDir)
+	if out, err := cloneCmd.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("git clone for rollback failed: %v (%s)", err, strings.TrimSpace(string(out)))
+	}
+
+	revCmd := exec.Command("git", "-C", tmpDir, "rev-list", "--max-count", "50", "HEAD")
+	out, err := revCmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("git rev-list failed: %v (%s)", err, strings.TrimSpace(string(out)))
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	revisions := make([]string, 0, len(lines))
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed != "" {
+			revisions = append(revisions, trimmed)
+		}
+	}
+	if len(revisions) < 2 {
+		return "", fmt.Errorf("rollback unavailable: branch history has fewer than 2 commits")
+	}
+
+	if currentRevision == "" {
+		return revisions[1], nil
+	}
+	for i, rev := range revisions {
+		if rev == currentRevision && i+1 < len(revisions) {
+			return revisions[i+1], nil
+		}
+	}
+
+	for _, rev := range revisions {
+		if rev != currentRevision {
+			return rev, nil
+		}
+	}
+	return "", fmt.Errorf("rollback unavailable: no previous revision found")
+}
+
 func listProjectsSnapshot() []*App {
 	projectsMu.RLock()
 	defer projectsMu.RUnlock()
@@ -1216,7 +1269,12 @@ func rollbackProject(projectID string, requestHost string) (*App, error) {
 
 	targetRevision, err := rollbackTargetRevision(projectID)
 	if err != nil {
-		return nil, err
+		inferred, inferErr := resolvePreviousRevision(config.RepoURL, config.Branch, project.LastCommitHash)
+		if inferErr != nil {
+			return nil, err
+		}
+		targetRevision = inferred
+		appendProjectLogLine(projectID, fmt.Sprintf("[INFO] inferred rollback target revision %s", targetRevision))
 	}
 	if project.AutoDeploy {
 		_, _ = setAutoDeploy(projectID, false)
