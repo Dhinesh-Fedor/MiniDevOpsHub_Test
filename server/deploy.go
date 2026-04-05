@@ -334,28 +334,45 @@ func appendProjectCommitHistory(projectID, revision string) []string {
 	return history
 }
 
-func rollbackProjectCommitHistory(projectID string) (string, error) {
-	projectsMu.Lock()
-	defer projectsMu.Unlock()
+func rollbackTargetRevision(projectID string) (string, error) {
+	projectsMu.RLock()
+	defer projectsMu.RUnlock()
 	project, ok := projects[projectID]
 	if !ok || project == nil {
 		return "", service.ErrNotFound
 	}
-	if len(project.CommitHistory) < 2 {
-		return "", fmt.Errorf("rollback unavailable: no previous revision recorded")
+	if len(project.CommitHistory) >= 2 {
+		return strings.TrimSpace(project.CommitHistory[len(project.CommitHistory)-2]), nil
 	}
-	target := project.CommitHistory[len(project.CommitHistory)-2]
-	project.CommitHistory = append([]string(nil), project.CommitHistory[:len(project.CommitHistory)-1]...)
-	project.LastCommitHash = commitHistoryLast(project.CommitHistory)
-	project.PrevCommitHash = commitHistoryPrev(project.CommitHistory)
-	if project.LastCommitHash != target {
-		project.LastCommitHash = target
-		if len(project.CommitHistory) == 0 || project.CommitHistory[len(project.CommitHistory)-1] != target {
-			project.CommitHistory = append(project.CommitHistory, target)
+	if strings.TrimSpace(project.PrevCommitHash) != "" {
+		return strings.TrimSpace(project.PrevCommitHash), nil
+	}
+	return "", fmt.Errorf("rollback unavailable: no previous revision recorded")
+}
+
+func finalizeRollbackCommitHistory(projectID, targetRevision string) {
+	targetRevision = strings.TrimSpace(targetRevision)
+	if targetRevision == "" {
+		return
+	}
+	projectsMu.Lock()
+	defer projectsMu.Unlock()
+	project, ok := projects[projectID]
+	if !ok || project == nil {
+		return
+	}
+	history := append([]string(nil), project.CommitHistory...)
+	if len(history) >= 2 && strings.TrimSpace(history[len(history)-2]) == targetRevision {
+		history = history[:len(history)-1]
+	} else if len(history) == 0 || strings.TrimSpace(history[len(history)-1]) != targetRevision {
+		history = append(history, targetRevision)
+		if len(history) > maxCommitHistory {
+			history = history[len(history)-maxCommitHistory:]
 		}
-		project.PrevCommitHash = commitHistoryPrev(project.CommitHistory)
 	}
-	return target, nil
+	project.CommitHistory = history
+	project.LastCommitHash = commitHistoryLast(history)
+	project.PrevCommitHash = commitHistoryPrev(history)
 }
 
 func syncAutoDeployWatchers() {
@@ -883,7 +900,11 @@ func runDeploy(projectID, repoURL, branch, workerID, requestHost string, port in
 		}
 	}
 	if targetHead != "" {
-		appendProjectCommitHistory(projectID, targetHead)
+		if strings.TrimSpace(revision) != "" {
+			finalizeRollbackCommitHistory(projectID, targetHead)
+		} else {
+			appendProjectCommitHistory(projectID, targetHead)
+		}
 	}
 	version := nextDeploymentVersion(projectID)
 	_ = deploySvc.CreateDeployment(&deployment.Deployment{
@@ -1193,7 +1214,7 @@ func rollbackProject(projectID string, requestHost string) (*App, error) {
 		}
 	}
 
-	targetRevision, err := rollbackProjectCommitHistory(projectID)
+	targetRevision, err := rollbackTargetRevision(projectID)
 	if err != nil {
 		return nil, err
 	}
