@@ -81,6 +81,7 @@ func deployHandler(w http.ResponseWriter, r *http.Request) {
 		Port:      fmt.Sprintf("%d", project.Port),
 		Status:    project.Status,
 		LiveURL:   project.LiveURL,
+		Revision:  project.LastCommitHash,
 	})
 }
 
@@ -161,6 +162,7 @@ func rollbackHandler(w http.ResponseWriter, r *http.Request) {
 		Port:      fmt.Sprintf("%d", rolledBackProject.Port),
 		Status:    rolledBackProject.Status,
 		LiveURL:   rolledBackProject.LiveURL,
+		Revision:  rolledBackProject.LastCommitHash,
 	})
 }
 
@@ -195,6 +197,7 @@ func redeployHandler(w http.ResponseWriter, r *http.Request) {
 		Port:      fmt.Sprintf("%d", project.Port),
 		Status:    project.Status,
 		LiveURL:   project.LiveURL,
+		Revision:  project.LastCommitHash,
 	})
 }
 
@@ -211,7 +214,7 @@ func autoDeployHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
-	project, err := setAutoDeploy(projectID, req.Enabled, publicHost(r))
+	project, err := setAutoDeploy(projectID, req.Enabled)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return

@@ -419,6 +419,7 @@
     .repo-card {
       display: grid;
       gap: 12px;
+      min-width: 0;
     }
 
     .repo-card code {
@@ -429,6 +430,9 @@
       background: rgba(255,255,255,0.03);
       border: 1px solid rgba(145, 168, 255, 0.12);
       color: #cbd8ff;
+      white-space: normal;
+      overflow-wrap: anywhere;
+      line-height: 1.45;
     }
 
     .footer-note {
@@ -571,6 +575,7 @@
           <div class="card-body repo-card">
             <div class="muted">Live URL</div>
             <code id="live-url">--</code>
+            <div id="deployment-status" class="footer-note">No deployment selected.</div>
             <div class="footer-note">Open the deployed app in a new tab from the table, or from the post-deploy prompt.</div>
           </div>
         </section>
@@ -651,17 +656,24 @@
       const label = document.getElementById('selected-project-label');
       const logsProjectLabel = document.getElementById('logs-project-label');
       const liveUrl = document.getElementById('live-url');
+      const deploymentStatus = document.getElementById('deployment-status');
       if (!project) {
         chip.style.display = 'none';
         label.textContent = '';
         logsProjectLabel.textContent = 'None selected';
         liveUrl.textContent = '--';
+        if (deploymentStatus) {
+          deploymentStatus.textContent = 'No deployment selected.';
+        }
         return;
       }
       chip.style.display = 'inline-flex';
       label.textContent = `${project.name} (${project.project_id})`;
       logsProjectLabel.textContent = project.project_id;
       liveUrl.textContent = preferredProjectURL(project) || '--';
+      if (deploymentStatus) {
+        deploymentStatus.textContent = project.last_commit_hash ? `Revision: ${project.last_commit_hash}` : 'Revision unavailable for this deployment.';
+      }
 
       document.querySelectorAll('#projects-body tr').forEach((row) => {
         row.classList.toggle('selected-row', row.getAttribute('data-project-id') === project.project_id);
@@ -754,11 +766,11 @@
             <details class="actions">
               <summary>Actions</summary>
               <div class="menu">
-                <button type="button" onclick="event.stopPropagation(); openProject('${project.project_id}')">Open</button>
-                <button type="button" onclick="event.stopPropagation(); redeployProjectAction('${project.project_id}')">Redeploy</button>
-                <button type="button" onclick="event.stopPropagation(); toggleAutoDeploy('${project.project_id}', ${project.auto_deploy ? 'false' : 'true'})">Auto Deploy: ${project.auto_deploy ? 'On' : 'Off'}</button>
-                <button type="button" onclick="event.stopPropagation(); rollbackProject('${project.project_id}')">Rollback</button>
-                <button type="button" onclick="event.stopPropagation(); cleanProject('${project.project_id}')">Clean</button>
+                <button type="button" onclick="event.stopPropagation(); closeOpenActionMenu(); openProject('${project.project_id}')">Open</button>
+                <button type="button" onclick="event.stopPropagation(); closeOpenActionMenu(); redeployProjectAction('${project.project_id}')">Redeploy</button>
+                <button type="button" onclick="event.stopPropagation(); closeOpenActionMenu(); toggleAutoDeploy('${project.project_id}', ${project.auto_deploy ? 'false' : 'true'})">Auto Deploy: ${project.auto_deploy ? 'On' : 'Off'}</button>
+                <button type="button" onclick="event.stopPropagation(); closeOpenActionMenu(); rollbackProject('${project.project_id}')">Rollback</button>
+                <button type="button" onclick="event.stopPropagation(); closeOpenActionMenu(); cleanProject('${project.project_id}')">Clean</button>
               </div>
             </details>
           </td>
@@ -844,10 +856,15 @@
       const project = projects.find((item) => item.project_id === response.project_id);
       if (project) {
         startLogPolling(project);
+        setSelectedProject(project);
       }
       await loadProjects();
       if (response.live_url) {
         document.getElementById('live-url').textContent = response.live_url;
+      }
+      const deploymentStatus = document.getElementById('deployment-status');
+      if (deploymentStatus) {
+        deploymentStatus.textContent = response.revision ? `Rolled back to ${response.revision}` : 'Rollback completed.';
       }
     }
 

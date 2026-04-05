@@ -7,6 +7,7 @@ type App struct {
 	Branch         string `json:"branch"`
 	AutoDeploy     bool   `json:"auto_deploy"`
 	LastCommitHash string `json:"last_commit_hash,omitempty"`
+	PrevCommitHash string `json:"prev_commit_hash,omitempty"`
 	WorkerID       string `json:"worker_id"`
 	WorkerName     string `json:"worker_name"`
 	WorkerIP       string `json:"worker_ip"`
@@ -33,6 +34,7 @@ type DeployResponse struct {
 	Port      string `json:"port,omitempty"`
 	Status    string `json:"status,omitempty"`
 	LiveURL   string `json:"live_url"`
+	Revision  string `json:"revision,omitempty"`
 }
 
 type CleanRequest struct {

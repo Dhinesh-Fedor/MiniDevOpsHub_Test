@@ -207,6 +207,15 @@ func updateProjectLastCommitHash(projectID, hash string) {
 	}
 }
 
+func updateProjectPrevCommitHash(projectID, hash string) {
+	hash = strings.TrimSpace(hash)
+	projectsMu.Lock()
+	defer projectsMu.Unlock()
+	if project, ok := projects[projectID]; ok {
+		project.PrevCommitHash = hash
+	}
+}
+
 func syncAutoDeployWatchers() {
 	for _, project := range listProjectsSnapshot() {
 		if project == nil {
@@ -276,7 +285,7 @@ func startAutoDeployLoop(projectID string) {
 	}()
 }
 
-func setAutoDeploy(projectID string, enabled bool, requestHost string) (*App, error) {
+func setAutoDeploy(projectID string, enabled bool) (*App, error) {
 	project, ok := getProject(projectID)
 	if !ok || project == nil {
 		return nil, service.ErrNotFound
@@ -554,6 +563,10 @@ func randomID() string {
 }
 
 func createOrUpdateProject(repoURL, branch, workerID, projectID string, requestHost string, autoDeploy *bool) (*App, error) {
+	return createOrUpdateProjectWithRevision(repoURL, branch, workerID, projectID, requestHost, autoDeploy, "")
+}
+
+func createOrUpdateProjectWithRevision(repoURL, branch, workerID, projectID string, requestHost string, autoDeploy *bool, revision string) (*App, error) {
 	branch = strings.TrimSpace(branch)
 	if branch == "" {
 		branch = "main"
@@ -580,11 +593,13 @@ func createOrUpdateProject(repoURL, branch, workerID, projectID string, requestH
 
 	autoDeployEnabled := false
 	lastCommitHash := ""
+	prevCommitHash := ""
 
 	// If project exists, remove old artifacts from worker
 	if existing, ok := getProject(projectID); ok {
 		autoDeployEnabled = existing.AutoDeploy
 		lastCommitHash = existing.LastCommitHash
+		prevCommitHash = existing.PrevCommitHash
 		_ = removeRuntimeArtifactsSSH(existing)
 	}
 	if autoDeploy != nil {
@@ -606,6 +621,7 @@ func createOrUpdateProject(repoURL, branch, workerID, projectID string, requestH
 		Branch:         branch,
 		AutoDeploy:     autoDeployEnabled,
 		LastCommitHash: lastCommitHash,
+		PrevCommitHash: prevCommitHash,
 		WorkerID:       worker.ID,
 		WorkerName:     worker.Name,
 		WorkerIP:       worker.IP,
@@ -637,7 +653,7 @@ func createOrUpdateProject(repoURL, branch, workerID, projectID string, requestH
 		HostPort:      hostPort,
 		ContainerPort: 3000,
 	})
-	go runDeploy(projectID, repoURL, branch, workerID, publicHost, hostPort)
+	go runDeploy(projectID, repoURL, branch, workerID, publicHost, hostPort, revision)
 	saveDashboardState()
 	return project, nil
 }
@@ -656,7 +672,7 @@ func chooseProjectPort(workerIP, projectID string) int {
 	return defaultPortBase
 }
 
-func runDeploy(projectID, repoURL, branch, workerID, requestHost string, port int) {
+func runDeploy(projectID, repoURL, branch, workerID, requestHost string, port int, revision string) {
 	workerIP := workerIPs[workerID]
 	defer func() {
 		syncWorkerLoad(workerID)
@@ -665,7 +681,7 @@ func runDeploy(projectID, repoURL, branch, workerID, requestHost string, port in
 
 	appendProjectLogLine(projectID, fmt.Sprintf("[INFO] starting deploy on %s (%s:%d)", workerID, workerIP, port))
 
-	remoteCmd := buildRemoteDeployCommand(projectID, repoURL, branch, port)
+	remoteCmd := buildRemoteDeployCommand(projectID, repoURL, branch, port, revision)
 	appendProjectLogLine(projectID, fmt.Sprintf("[DEBUG] remote deploy command prepared for %s", workerIP))
 	cmd := exec.Command("ssh", "-i", sshKeyPath, sshUser+"@"+workerIP, remoteCmd)
 	stdout, err := cmd.StdoutPipe()
@@ -715,8 +731,20 @@ func runDeploy(projectID, repoURL, branch, workerID, requestHost string, port in
 
 	updateProjectStatus(projectID, "running")
 	updateProjectLiveURL(projectID, resolvedLiveURL(requestHost, workerIP, port, projectID))
-	if head, err := resolveRemoteHead(repoURL, branch); err == nil {
-		updateProjectLastCommitHash(projectID, head)
+	targetHead := strings.TrimSpace(revision)
+	if targetHead == "" {
+		if head, err := resolveRemoteHead(repoURL, branch); err == nil {
+			targetHead = head
+		}
+	}
+	if targetHead != "" {
+		if current, ok := getProject(projectID); ok {
+			prev := strings.TrimSpace(current.LastCommitHash)
+			if prev != "" && prev != targetHead {
+				updateProjectPrevCommitHash(projectID, prev)
+			}
+		}
+		updateProjectLastCommitHash(projectID, targetHead)
 	}
 	version := nextDeploymentVersion(projectID)
 	_ = deploySvc.CreateDeployment(&deployment.Deployment{
@@ -753,11 +781,15 @@ func verifyWorkerUpstreamReachable(projectID, workerIP string, port int) error {
 	return fmt.Errorf("worker upstream unreachable (%s). Check worker security group and container startup. last error: %v", target, lastErr)
 }
 
-func buildRemoteDeployCommand(projectID, repoURL, branch string, port int) string {
+func buildRemoteDeployCommand(projectID, repoURL, branch string, port int, revision string) string {
 	branch = strings.TrimSpace(branch)
 	cloneCmd := fmt.Sprintf("git clone %s /tmp/%s", repoURL, projectID)
 	if branch != "" {
 		cloneCmd = fmt.Sprintf("git clone --branch %s %s /tmp/%s", branch, repoURL, projectID)
+	}
+	checkoutCmd := ""
+	if rev := strings.TrimSpace(revision); rev != "" {
+		checkoutCmd = fmt.Sprintf("git checkout %s", rev)
 	}
 
 	return fmt.Sprintf(`set -e
@@ -765,6 +797,7 @@ docker rm -f app-%[1]s >/dev/null 2>&1 || true
 	sudo rm -rf /tmp/%[1]s || true
 %[2]s
 cd /tmp/%[1]s
+%[4]s
 
 verify_running() {
   if ! docker ps --filter "name=^/app-%[1]s$" --filter "status=running" --format '{{.Names}}' | grep -q "app-%[1]s"; then
@@ -910,7 +943,7 @@ if [ "$DEPLOY_DONE" -eq 0 ]; then
   echo "[ERROR] No supported build configuration found" >&2
   exit 1
 fi
-`, projectID, cloneCmd, port)
+`, projectID, cloneCmd, port, checkoutCmd)
 }
 
 func readPipe(pipe interface{ Read([]byte) (int, error) }, projectID string) {
@@ -991,6 +1024,11 @@ func redeployProject(projectID string, requestHost string) (*App, error) {
 	if !ok {
 		return nil, service.ErrNotFound
 	}
+	if strings.TrimSpace(requestHost) == "" {
+		if parsed, err := url.Parse(strings.TrimSpace(project.LiveURL)); err == nil && parsed.Host != "" {
+			requestHost = parsed.Host
+		}
+	}
 	return createOrUpdateProject(project.RepoURL, project.Branch, project.WorkerID, projectID, requestHost, nil)
 }
 
@@ -1002,10 +1040,19 @@ func rollbackProject(projectID string, requestHost string) (*App, error) {
 	if config == nil {
 		return nil, service.ErrNotFound
 	}
-	if _, ok := getProject(projectID); !ok {
+	project, ok := getProject(projectID)
+	if !ok {
 		return nil, service.ErrNotFound
 	}
-	return createOrUpdateProject(config.RepoURL, config.Branch, config.WorkerID, projectID, requestHost, nil)
+	targetRevision := strings.TrimSpace(project.PrevCommitHash)
+	if targetRevision == "" {
+		return nil, fmt.Errorf("rollback unavailable: no previous revision recorded")
+	}
+	if project.AutoDeploy {
+		_, _ = setAutoDeploy(projectID, false)
+		appendProjectLogLine(projectID, "[INFO] auto-deploy disabled for rollback")
+	}
+	return createOrUpdateProjectWithRevision(config.RepoURL, config.Branch, config.WorkerID, projectID, requestHost, nil, targetRevision)
 }
 
 func cleanProject(projectID string) error {
@@ -1082,35 +1129,18 @@ func removeProjectNginxConfig(projectID string) error {
 }
 
 func reloadNginx() error {
-	testCmd := exec.Command("nginx", "-t")
+	testCmd := exec.Command("sudo", "nginx", "-t")
 	output, err := testCmd.CombinedOutput()
 	if err != nil {
 		if len(output) > 0 {
 			storeProjectLogs("system", strings.Split(strings.TrimSpace(string(output)), "\n"))
 			log.Printf("nginx syntax check output=%s", strings.TrimSpace(string(output)))
 		}
-		// Some environments require root privileges to read nginx pid/log paths.
-		testCmd = exec.Command("sudo", "nginx", "-t")
-		output, err = testCmd.CombinedOutput()
-		if err != nil {
-			if len(output) > 0 {
-				storeProjectLogs("system", strings.Split(strings.TrimSpace(string(output)), "\n"))
-				log.Printf("nginx syntax check output=%s", strings.TrimSpace(string(output)))
-			}
-			return err
-		}
+		return err
 	}
 
-	reloadCmd := exec.Command("nginx", "-s", "reload")
+	reloadCmd := exec.Command("sudo", "nginx", "-s", "reload")
 	output, err = reloadCmd.CombinedOutput()
-	if err != nil {
-		if len(output) > 0 {
-			storeProjectLogs("system", strings.Split(strings.TrimSpace(string(output)), "\n"))
-			log.Printf("nginx reload output=%s", strings.TrimSpace(string(output)))
-		}
-		reloadCmd = exec.Command("sudo", "nginx", "-s", "reload")
-		output, err = reloadCmd.CombinedOutput()
-	}
 	if len(output) > 0 {
 		storeProjectLogs("system", strings.Split(strings.TrimSpace(string(output)), "\n"))
 		log.Printf("nginx reload output=%s", strings.TrimSpace(string(output)))
