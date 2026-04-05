@@ -120,6 +120,70 @@ func loadDashboardState() {
 			_ = workerSvc.CreateWorker(worker)
 		}
 	}
+	rehydrateDeployStateFromProjects()
+}
+
+func normalizeCommitHistory(history []string, prevHash, lastHash string) []string {
+	cleaned := make([]string, 0, len(history)+2)
+	for _, entry := range history {
+		trimmed := strings.TrimSpace(entry)
+		if trimmed == "" {
+			continue
+		}
+		if len(cleaned) == 0 || cleaned[len(cleaned)-1] != trimmed {
+			cleaned = append(cleaned, trimmed)
+		}
+	}
+	prevHash = strings.TrimSpace(prevHash)
+	lastHash = strings.TrimSpace(lastHash)
+	if len(cleaned) == 0 {
+		if prevHash != "" {
+			cleaned = append(cleaned, prevHash)
+		}
+		if lastHash != "" && lastHash != prevHash {
+			cleaned = append(cleaned, lastHash)
+		}
+	} else if lastHash != "" && cleaned[len(cleaned)-1] != lastHash {
+		cleaned = append(cleaned, lastHash)
+	}
+	if len(cleaned) > maxCommitHistory {
+		cleaned = cleaned[len(cleaned)-maxCommitHistory:]
+	}
+	return cleaned
+}
+
+func rehydrateDeployStateFromProjects() {
+	projectsMu.Lock()
+	defer projectsMu.Unlock()
+	for _, project := range projects {
+		if project == nil || strings.TrimSpace(project.ProjectID) == "" {
+			continue
+		}
+		if strings.TrimSpace(project.Branch) == "" {
+			project.Branch = "main"
+		}
+		if strings.TrimSpace(project.WorkerIP) == "" {
+			if ip, ok := workerIPs[project.WorkerID]; ok {
+				project.WorkerIP = ip
+			}
+		}
+		project.CommitHistory = normalizeCommitHistory(project.CommitHistory, project.PrevCommitHash, project.LastCommitHash)
+		project.LastCommitHash = commitHistoryLast(project.CommitHistory)
+		project.PrevCommitHash = commitHistoryPrev(project.CommitHistory)
+
+		_ = deploySvc.RecordLastConfig(project.ProjectID, &service.DeployConfig{
+			ProjectID:     project.ProjectID,
+			RepoURL:       project.RepoURL,
+			Branch:        project.Branch,
+			WorkerID:      project.WorkerID,
+			WorkerIP:      project.WorkerIP,
+			ImageName:     project.ImageName,
+			ContainerName: project.ContainerName,
+			WorkspaceDir:  project.WorkspaceDir,
+			ContainerPort: 3000,
+			HostPort:      project.Port,
+		})
+	}
 }
 
 func seedDefaultWorkers() {
@@ -342,7 +406,7 @@ func startAutoDeployLoop(projectID string) {
 				return
 			}
 			if project.LastCommitHash == "" {
-				updateProjectLastCommitHash(projectID, head)
+				appendProjectCommitHistory(projectID, head)
 				saveDashboardState()
 				return
 			}
@@ -374,7 +438,7 @@ func setAutoDeploy(projectID string, enabled bool) (*App, error) {
 	updateProjectAutoDeploy(projectID, enabled)
 	if enabled {
 		if head, err := resolveRemoteHead(project.RepoURL, project.Branch); err == nil {
-			updateProjectLastCommitHash(projectID, head)
+			appendProjectCommitHistory(projectID, head)
 		}
 		startAutoDeployLoop(projectID)
 		appendProjectLogLine(projectID, "[INFO] auto-deploy enabled")
@@ -1108,17 +1172,27 @@ func redeployProject(projectID string, requestHost string) (*App, error) {
 }
 
 func rollbackProject(projectID string, requestHost string) (*App, error) {
-	config, err := deploySvc.GetLastConfig(projectID)
-	if err != nil {
-		return nil, err
-	}
-	if config == nil {
-		return nil, service.ErrNotFound
-	}
 	project, ok := getProject(projectID)
 	if !ok {
 		return nil, service.ErrNotFound
 	}
+
+	config, err := deploySvc.GetLastConfig(projectID)
+	if err != nil || config == nil {
+		config = &service.DeployConfig{
+			ProjectID:     project.ProjectID,
+			RepoURL:       project.RepoURL,
+			Branch:        project.Branch,
+			WorkerID:      project.WorkerID,
+			WorkerIP:      project.WorkerIP,
+			ImageName:     project.ImageName,
+			ContainerName: project.ContainerName,
+			WorkspaceDir:  project.WorkspaceDir,
+			ContainerPort: 3000,
+			HostPort:      project.Port,
+		}
+	}
+
 	targetRevision, err := rollbackProjectCommitHistory(projectID)
 	if err != nil {
 		return nil, err

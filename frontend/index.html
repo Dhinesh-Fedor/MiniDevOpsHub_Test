@@ -400,12 +400,16 @@
       justify-content: space-between;
       gap: 12px;
       align-items: center;
+      min-width: 0;
     }
 
     .logs {
       min-height: 240px;
       max-height: 300px;
       overflow: auto;
+      width: 100%;
+      max-width: 100%;
+      min-width: 0;
       padding: 14px;
       border-radius: 16px;
       background: #050814;
@@ -415,6 +419,8 @@
       line-height: 1.6;
       color: #dbe4ff;
       white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      word-break: break-word;
     }
 
     .repo-card {
