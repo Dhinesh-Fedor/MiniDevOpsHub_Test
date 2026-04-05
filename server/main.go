@@ -44,6 +44,12 @@ func main() {
 	log.Println("MiniDevOpsHub starting...")
 	http.DefaultServeMux = http.NewServeMux()
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		// Serve dashboard only on root paths; do not hijack arbitrary app routes.
+		if r.URL.Path == "/" || r.URL.Path == "/index.html" {
+			http.ServeFile(w, r, "frontend/index.html")
+			return
+		}
+
 		// If the path looks like an API or known backend route, 404
 		if strings.HasPrefix(r.URL.Path, "/app") ||
 			strings.HasPrefix(r.URL.Path, "/apps") ||
@@ -60,7 +66,8 @@ func main() {
 			http.NotFound(w, r)
 			return
 		}
-		http.ServeFile(w, r, "frontend/index.html")
+
+		http.NotFound(w, r)
 	})
 	http.HandleFunc("/app/create", createAppHandler)
 	http.HandleFunc("/apps", listAppsHandler)

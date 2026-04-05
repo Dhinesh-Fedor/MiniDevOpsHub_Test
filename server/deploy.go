@@ -881,12 +881,13 @@ func writeProjectNginxConfig(project *App) error {
 		}
 	}
 	conf := fmt.Sprintf(
-		"location = /%s {\n    return 301 /%s/;\n}\n\nlocation /%s/ {\n    proxy_pass http://%s:%d/;\n\n    proxy_http_version 1.1;\n\n    proxy_set_header Host $host;\n    proxy_set_header X-Real-IP $remote_addr;\n    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n\n    # IMPORTANT: rewrite path correctly\n    rewrite ^/%s/?(.*)$ /$1 break;\n\n    # OPTIONAL: support SPA fallback\n    proxy_intercept_errors on;\n}\n",
+		"location = /%s {\n    return 301 /%s/;\n}\n\nlocation /%s/ {\n    proxy_pass http://%s:%d;\n\n    proxy_http_version 1.1;\n\n    proxy_set_header Host $host;\n    proxy_set_header X-Real-IP $remote_addr;\n    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n\n    # FIX: correct rewrite logic\n    rewrite ^/%s/(.*)$ /$1 break;\n\n    # FIX: ensure root works\n    rewrite ^/%s/$ / break;\n\n    proxy_intercept_errors on;\n}\n",
 		project.ProjectID,
 		project.ProjectID,
 		project.ProjectID,
 		project.WorkerIP,
 		project.Port,
+		project.ProjectID,
 		project.ProjectID,
 	)
 	confPath := fmt.Sprintf("%s/%s.conf", nginxRoutesDir, project.ProjectID)
@@ -925,27 +926,15 @@ func reloadNginx() error {
 	testCmd := exec.Command("nginx", "-t")
 	output, err := testCmd.CombinedOutput()
 	if err != nil {
-		testCmd = exec.Command("sudo", "nginx", "-t")
-		output, err = testCmd.CombinedOutput()
-		if err != nil {
-			if len(output) > 0 {
-				storeProjectLogs("system", strings.Split(strings.TrimSpace(string(output)), "\n"))
-				log.Printf("nginx syntax check output=%s", strings.TrimSpace(string(output)))
-			}
-			return err
+		if len(output) > 0 {
+			storeProjectLogs("system", strings.Split(strings.TrimSpace(string(output)), "\n"))
+			log.Printf("nginx syntax check output=%s", strings.TrimSpace(string(output)))
 		}
+		return err
 	}
 
 	reloadCmd := exec.Command("nginx", "-s", "reload")
 	output, err = reloadCmd.CombinedOutput()
-	if err != nil {
-		reloadCmd = exec.Command("sudo", "nginx", "-s", "reload")
-		output, err = reloadCmd.CombinedOutput()
-	}
-	if err != nil {
-		reloadCmd = exec.Command("sudo", "systemctl", "reload", "nginx")
-		output, err = reloadCmd.CombinedOutput()
-	}
 	if len(output) > 0 {
 		storeProjectLogs("system", strings.Split(strings.TrimSpace(string(output)), "\n"))
 		log.Printf("nginx reload output=%s", strings.TrimSpace(string(output)))
